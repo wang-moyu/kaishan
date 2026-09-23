@@ -16,6 +16,8 @@ const inputEl = ref<HTMLInputElement | null>(null);
 
 watch(collapsed, (v) => {
   localStorage.setItem('chat-collapsed', v ? '1' : '0');
+  // 重新展开时立刻补拉一次，收起期间没有轮询。
+  if (!v) void load();
 });
 
 let pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -100,7 +102,10 @@ function renderContent(text: string): string {
 
 onMounted(() => {
   load();
-  pollTimer = setInterval(load, 8_000);
+  // 面板收起或标签页在后台时不轮询：没人看的时候不必每 8 秒请求一次。
+  pollTimer = setInterval(() => {
+    if (!collapsed.value && !document.hidden) void load();
+  }, 8_000);
   document.addEventListener('click', onPickerOutsideClick);
 });
 

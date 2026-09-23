@@ -130,8 +130,9 @@ async function submitBet(): Promise<void> {
 
 function startPolling(): void {
   stopPolling();
+  // 标签页在后台时不轮询（倒计时本地走），切回来后下一个 5 秒内就会补上最新状态。
   pollTimer = window.setInterval(() => {
-    void loadRaceState();
+    if (!document.hidden) void loadRaceState();
   }, 5000);
 }
 

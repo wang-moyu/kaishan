@@ -326,9 +326,19 @@ const timer = window.setInterval(() => {
   syncExpiredJourneys();
 }, 1000);
 
-/** 切回标签页时补一次同步（App.vue 的 60 秒轮询在隐藏标签页里不跑）。 */
+/** 离开超过这个时长再切回标签页才补同步；短暂切走不发请求（本地推算足够准确）。 */
+const RESYNC_AFTER_HIDDEN_MS = 5 * 60_000;
+let hiddenAt: number | null = null;
+
+/** 切回标签页时按需补一次同步（App.vue 的低频轮询在隐藏标签页里不跑）。 */
 function onVisibilityChange(): void {
-  if (document.hidden || props.busy) return;
+  if (document.hidden) {
+    hiddenAt = Date.now();
+    return;
+  }
+  const awayMs = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+  hiddenAt = null;
+  if (props.busy || awayMs < RESYNC_AFTER_HIDDEN_MS) return;
   emit('refresh');
 }
 

@@ -786,12 +786,13 @@ function onSectCreated(created: SectStateView): void {
 
 onMounted(() => {
   void bootstrap();
-  // 每 60 秒同步一次；隐藏标签页不轮询，服务端仍是资源与修为的唯一权威。
+  // 资源与修为由 SectScreen 每秒在本地推算，这里只需低频校正（补随机事件、消除累计误差），
+  // 每 10 分钟一次即可；隐藏标签页不轮询。服务端仍是资源与修为的唯一权威。
   syncTimer = window.setInterval(() => {
     if (phase.value === 'playing' && !busy.value && !document.hidden) {
       void refresh(false);
     }
-  }, 60_000);
+  }, 10 * 60_000);
 });
 
 onUnmounted(() => {

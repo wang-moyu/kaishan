@@ -569,6 +569,11 @@ class SectDraft {
   activeExploration: RealmExplorationRow | null;
   /** 0014：本批归队入账产生的语句（附在结算写回之后同批提交）。 */
   private readonly journeyReturnStatements: ParameterizedQuery[] = [];
+
+  /** 本次结算是否有弟子历练到期归队（归队必须落库，不能只做只读预览）。 */
+  get hasJourneyReturns(): boolean {
+    return this.journeyReturnStatements.length > 0;
+  }
   /** 0014：本批已完成归队的弟子 id（他们的修为/伤势由归队语句一次写完）。 */
   private readonly journeyReturnedDiscipleIds = new Set<string>();
 
@@ -576,6 +581,8 @@ class SectDraft {
     private readonly db: D1Database,
     private readonly base: SectSnapshot,
     now: number,
+    /** 离线结算的随机源（只影响随机事件）；只读预览传 () => 1，保证不掷出任何事件。 */
+    random: () => number = Math.random,
   ) {
     this.config = gameConfig();
     this.now = now;
@@ -620,7 +627,7 @@ class SectDraft {
       capacityMultiplier: this.capacityMultiplier,
       buildingLevels: Object.fromEntries(base.buildings.map((row) => [row.def_id, row.level])),
       absences,
-    });
+    }, random);
 
     this.sect = { ...base.sect, last_settled_at: this.settleResult.lastSettledAt };
     this.balances = base.balances.map((row) => {
@@ -1417,6 +1424,9 @@ async function draftFor(db: D1Database, userId: string, now: number): Promise<Se
   return new SectDraft(db, snapshot, now);
 }
 
+/** GET /game/sync 最多每隔多久把离线结算写回一次（见 getSectState）。 */
+const SYNC_PERSIST_INTERVAL_MS = 5 * 60 * 1000;
+
 /** 读宗门状态：没有宗门返回 null（前端据此显示创建宗门）。 */
 export async function getSectState(
   db: D1Database,
@@ -1427,6 +1437,14 @@ export async function getSectState(
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const snapshot = await loadSnapshot(db, userId, now);
     if (snapshot === null) return null;
+    // 省 D1 写入：前端每分钟自动同步一次，若每次都把结算写回，挂机玩家一小时就要写上千行。
+    // 产出是按时间确定性计算的，晚几分钟写回结果不变；所以距上次写回不足 SYNC_PERSIST_INTERVAL_MS 时
+    // 只在内存里结算并返回（不掷随机事件——事件按经过时长计期望次数，推迟写回不会少发），
+    // 有历练归队时仍照常落库。玩家的主动操作不走这里，照旧立即写入。
+    if (now - Number(snapshot.sect.last_settled_at) < SYNC_PERSIST_INTERVAL_MS) {
+      const preview = new SectDraft(db, snapshot, now, () => 1);
+      if (!preview.hasJourneyReturns) return preview.view();
+    }
     const draft = new SectDraft(db, snapshot, now);
     try {
       await draft.commit();
