@@ -1,0 +1,19 @@
+{
+  "name": "@xiuxian/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "请求/响应 schema、错误码与公共枚举（P0-03 起实现）",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@xiuxian/game-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "无 IO 的结算、成长、战斗与配置校验纯函数（配置校验在 P0-03，其余自 P1 起实现）",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@xiuxian/contracts": "*",
+    "zod": "4.6.5"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

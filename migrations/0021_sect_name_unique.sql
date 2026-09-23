@@ -1,0 +1,22 @@
+-- Migration number: 0021 	Name: sect_name_unique
+--
+-- 宗门名全局唯一（建宗与改名都不允许与已有宗门重名）：
+--   sects <- 新增唯一索引 sects_name_uniq(name)
+--
+-- 为什么用唯一索引，而不是只在 service 层 SELECT 查重：
+--   - 应用层查重（service.requireSectNameAvailable）只能给出友好文案，挡不住并发：
+--     两个请求可能同时看到「没人占用」，随后各写一行同名宗门；
+--   - 唯一索引让后到的那个提交拿到 UNIQUE 失败、整批回滚，再由 service 映射成 STATE_CONFLICT，
+--     与 0012（同一目标每日只允许一次挑战）、0015（同时只允许一局探索）是同一套做法。
+--
+-- 口径（与 service 里的 `=` 查重完全一致）：
+--   - BINARY 排序（SQLite 默认）：'QingYun' 与 'qingyun' 视为**不同**名字；
+--     名字写库前已经 trim，因此前后空白不参与比较；
+--   - 只约束宗门名：disciples.name 仍然允许重名（门内可以有同名弟子，改名/招募都不查重）。
+--
+-- 注意（这是一条**可能失败**的迁移，上线前必须先查一次重复数据）：
+--   CREATE UNIQUE INDEX 在已有重名行时会直接失败并阻断迁移，先执行
+--     SELECT name, COUNT(*) AS c FROM sects GROUP BY name HAVING c > 1;
+--   返回空结果才可以安全 apply；若有结果，需要先人工处理重名（改名 / 合并）再迁移。
+--   本地与 CI 用的是空库，永远可以直接应用（每个迁移文件按一次事务执行，失败整体回滚）。
+CREATE UNIQUE INDEX sects_name_uniq ON sects (name);

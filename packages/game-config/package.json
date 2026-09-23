@@ -1,0 +1,19 @@
+{
+  "name": "@xiuxian/game-config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "带版本的静态配置（资源、建筑、岗位、宗门初始值等；P0-03 起实现）",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@xiuxian/game-core": "*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@xiuxian/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers + Hono 后端",
+  "scripts": {
+    "dev": "wrangler dev --persist-to .wrangler/state/dev",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "cf:types": "wrangler types",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "db:check:local-binding": "node ../../scripts/db/check-local-binding.mjs --config ./wrangler.jsonc",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local --persist-to .wrangler/state/dev",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote --config wrangler.production.jsonc",
+    "db:seed:local": "wrangler d1 execute DB --local --persist-to .wrangler/state/dev --file ../../scripts/seed/seed.sql",
+    "deploy:production": "wrangler deploy --config wrangler.production.jsonc",
+    "test:unit": "npm run db:check:local-binding && vitest run"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0",
+    "@xiuxian/contracts": "*",
+    "@xiuxian/game-config": "*",
+    "@xiuxian/game-core": "*",
+    "hono": "4.13.8"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "wrangler": "4.133.0"
+  }
+}

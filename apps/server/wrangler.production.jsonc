@@ -1,0 +1,34 @@
+{
+  // 生产部署专用配置。默认 wrangler.jsonc 保持本地 D1 哨兵，避免测试误连远程库。
+  "name": "xiuxian-game-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "ENVIRONMENT": "production",
+    "REGISTRATION_ENABLED": "true",
+    "INVITE_CODES": "",
+    "SESSION_TTL_SECONDS": "604800",
+    "LOGIN_RATE_LIMIT_MAX_ATTEMPTS": "5",
+    "LOGIN_RATE_LIMIT_WINDOW_SECONDS": "60",
+    "ALLOWED_ORIGINS": "",
+    "REALM_EXPLORE_ENABLED": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "xiuxian-game-db",
+      "database_id": "__D1_DATABASE_ID__",
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  },
+  "assets": {
+    "directory": "../web/dist",
+    "not_found_handling": "single-page-application"
+  }
+}

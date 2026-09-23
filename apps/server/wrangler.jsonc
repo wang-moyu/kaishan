@@ -1,0 +1,53 @@
+{
+  // Worker 入口：index.ts 把 fetch 交给 Hono；scheduled 持久任务执行器由 P0-05 接入
+  "name": "xiuxian-game-server",
+  "main": "src/index.ts",
+  // compatibility_date 取工具链共同支持的上限：@cloudflare/vitest-pool-workers 0.22 内置的
+  // workerd 1.20260815.1 最高支持 2026-08-22，而 wrangler 4.133.0 自带 workerd 1.20260916.1。
+  // 取较小值可让 dev/测试/部署使用同一运行时语义；升级 pool-workers 后再评估上调。
+  "compatibility_date": "2026-08-22",
+  // 依赖中没有需要 nodejs_compat 的包；若后续引入，需先核验再添加 flags
+  "observability": {
+    "enabled": true
+  },
+  // 非敏感运行参数（P0-04）。生产环境：REGISTRATION_ENABLED / INVITE_CODES 等应通过
+  // wrangler secret put 或环境配置覆盖；secret 同名时会覆盖 vars（见 docs/setup.md）。
+  "vars": {
+    // local：本地 http 开发，Cookie 不带 Secure；production：Cookie 必须 Secure
+    "ENVIRONMENT": "production",
+    // 本地开发通过 .dev.vars 覆盖为 "local"
+    "REGISTRATION_ENABLED": "true",
+    "INVITE_CODES": "",
+    "SESSION_TTL_SECONDS": "604800",
+    // 登录限频：窗口内最多尝试次数（按账号与来源 IP 两个维度计数，D1 原子计数）
+    "LOGIN_RATE_LIMIT_MAX_ATTEMPTS": "5",
+    "LOGIN_RATE_LIMIT_WINDOW_SECONDS": "60",
+    // 仅本地开发用：前端直连 Worker（不经 Vite 代理）时显式放行的来源，生产保持为空
+    "ALLOWED_ORIGINS": "",
+    // 交互式秘境探索（V6）开关：只有 "true" 时 /game/realms 才下发 exploreEnabled=true，
+    // 前端据此显示「探索」按钮；"false" 时只保留原有的「速通」。OPENROUTER_API_KEY 是
+    // secret（wrangler secret put 注入），不写进这里。
+    "REALM_EXPLORE_ENABLED": "true"
+  },
+  // 单服单库：所有资产相关数据放在同一个 D1 数据库（见 02 第 3 节）。
+  // database_id 使用全零 UUID 哨兵值，明确表示“尚未接远程库”；远程 id 必须在取得授权后填写。
+  // 测试会在跑任何用例前断言它仍是哨兵值（scripts/db/check-local-binding.mjs），避免误连生产库。
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "xiuxian-game-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      // 迁移文件放在仓库根 migrations/（见 02 第 2 节），按编号前进
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  // 灵兽竞逐结算：每 10 分钟触发 scheduled()，选冠军 + 发奖
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  },
+  // 前端静态资源：Worker 同时服务 API 和前端，同域无 CORS 问题
+  "assets": {
+    "directory": "../web/dist",
+    "not_found_handling": "single-page-application"
+  }
+}

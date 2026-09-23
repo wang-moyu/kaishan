@@ -1,0 +1,10 @@
+{
+  // 仓库自有 Node 脚本（scripts/**）的独立工程：这些脚本跑在 Node 上，
+  // 与 Worker（workerd 类型）和前端（DOM 类型）都不同，因此单独一份 tsconfig，
+  // 只引入 node 类型，避免把 process / node:* 泄漏进其他工程。
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["accounts/**/*.ts"]
+}

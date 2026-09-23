@@ -1,0 +1,29 @@
+# 本地开发 secret 示例。复制为 .dev.vars 后填写；.dev.vars 已被 .gitignore 忽略，不得提交真实值。
+# 远程使用 wrangler secret put（须经授权），不要写进 wrangler.jsonc。
+#
+# wrangler.jsonc 的 vars 已提供本地默认值；这里列出的同名变量会覆盖它们（secret 优先）。
+#
+# 邀请内测（P0-04）：默认关闭注册。本地要开放注册时复制本文件为 .dev.vars 并设置：
+#   REGISTRATION_ENABLED=true
+#   INVITE_CODES=local-dev-invite-1,local-dev-invite-2
+#
+# 生产环境：
+#   ENVIRONMENT=production            # 让 session Cookie 带上 Secure
+#   REGISTRATION_ENABLED=true|false
+#   INVITE_CODES=<逗号分隔的邀请码>    # 建议用 wrangler secret put INVITE_CODES 提供
+#
+# 其它鉴权变量（通常不用改；非法值会回退到安全默认值）：
+#   SESSION_TTL_SECONDS=604800             # 会话有效期（秒），默认 7 天
+#   LOGIN_RATE_LIMIT_MAX_ATTEMPTS=5        # 固定窗口内允许的失败次数（账号 + 来源 IP 双维度）
+#   LOGIN_RATE_LIMIT_WINDOW_SECONDS=60     # 固定窗口长度（秒）
+#   ALLOWED_ORIGINS=                       # 仅本地前端直连 Worker 时使用的白名单；生产必须留空
+#
+# V6 交互式秘境探索：wrangler.jsonc 的 REALM_EXPLORE_ENABLED 默认 "false"（只显示「速通」）。
+# 本地要试交互探索就覆盖成 true：
+#   REALM_EXPLORE_ENABLED=true
+# 判定用的模型 key 是可选项：没有 key（或调用失败 / 超时）时服务端会自动降级成本地随机，
+# 探索流程照常可玩；要真的走模型再填：
+#   OPENROUTER_API_KEY=sk-or-...        # 远程请用 wrangler secret put OPENROUTER_API_KEY
+#
+# 注意：注册与登录都要跑 Argon2id（本机约 140～156 ms/次），超过 Workers Free 的 10 ms/请求 CPU 上限，
+# 因此这两条路径需要 Workers Paid 套餐（见 docs/setup.md 的已知问题说明）。

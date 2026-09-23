@@ -1,0 +1,44 @@
+// 「Deploy to Cloudflare」一键部署专用配置（仓库根目录，路径均相对根目录）。
+//
+// - 本地开发与本仓库自己的 GitHub Actions 部署都在 apps/server 下，使用那里的 wrangler.jsonc /
+//   wrangler.production.jsonc，不会读取本文件。
+// - name / database_name 故意与线上正式服（xiuxian-game-server / xiuxian-game-db）不同，
+//   避免在同一账号里用按钮测试时覆盖正式服。
+// - database_id 是模板默认值：按钮会为部署者新建 D1 并改写为新 ID（需首次部署验证）。
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kaishan",
+  "main": "apps/server/src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "observability": {
+    "enabled": true
+  },
+  // 按钮表单不接受空值，所以留空即可的 INVITE_CODES / ALLOWED_ORIGINS 不写在这里（缺省等同留空）；
+  // 需要邀请码时，部署后在 Worker 的 Settings → Variables 里添加 INVITE_CODES。
+  "vars": {
+    "ENVIRONMENT": "production",
+    "REGISTRATION_ENABLED": "true",
+    "SESSION_TTL_SECONDS": "604800",
+    "LOGIN_RATE_LIMIT_MAX_ATTEMPTS": "5",
+    "LOGIN_RATE_LIMIT_WINDOW_SECONDS": "60",
+    "REALM_EXPLORE_ENABLED": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "kaishan-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // 灵兽竞逐结算：每 10 分钟触发 scheduled()
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  },
+  "assets": {
+    "directory": "apps/web/dist",
+    "not_found_handling": "single-page-application",
+    // 浏览器直接打开 /api/* 时也先走 Worker，而不是被 SPA 回退成 index.html
+    "run_worker_first": ["/api/*"]
+  }
+}
