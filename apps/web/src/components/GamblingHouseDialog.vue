@@ -6,6 +6,7 @@ import type {
   DaoDebateInput,
   DaoDebateResult,
   DebateHistoryEntry,
+  DebateHistoryPage,
   SectStateView,
   WheelSpinResult,
 } from '../api/game';
@@ -71,6 +72,7 @@ const historyEntries = ref<DebateHistoryEntry[]>([]);
 const historyPage = ref(1);
 const historyTotalPages = ref(1);
 const historyLoading = ref(false);
+const historyStats = ref<DebateHistoryPage['stats'] | null>(null);
 
 async function loadHistory(page: number): Promise<void> {
   historyLoading.value = true;
@@ -79,6 +81,7 @@ async function loadHistory(page: number): Promise<void> {
     historyEntries.value = data.entries;
     historyPage.value = data.page;
     historyTotalPages.value = data.totalPages;
+    historyStats.value = data.stats;
   } finally {
     historyLoading.value = false;
   }
@@ -729,33 +732,33 @@ const RULES_TEXT = `论道赌局 · 玩法说明
     <ModalShell v-if="showRecord" narrow label="赌坊记录" @close="showRecord = false">
       <section class="gambling-record-card" aria-labelledby="gambling-record-title">
         <h2 id="gambling-record-title" class="disciple-detail-title">赌坊记录</h2>
-        <template v-if="state.gambling.stats && state.gambling.stats.total > 0">
+        <template v-if="historyStats && historyStats.total > 0">
           <dl class="gambling-record-stats">
             <div>
               <dt>总场次</dt>
-              <dd>{{ state.gambling.stats.total }}</dd>
+              <dd>{{ historyStats.total }}</dd>
             </div>
             <div>
               <dt>胜</dt>
-              <dd class="record-win">{{ state.gambling.stats.wins }}</dd>
+              <dd class="record-win">{{ historyStats.wins }}</dd>
             </div>
             <div>
               <dt>负</dt>
-              <dd class="record-lose">{{ state.gambling.stats.losses }}</dd>
+              <dd class="record-lose">{{ historyStats.losses }}</dd>
             </div>
             <div>
               <dt>胜率</dt>
-              <dd>{{ state.gambling.stats.winRate }}%</dd>
+              <dd>{{ historyStats.winRate }}%</dd>
             </div>
             <div>
               <dt>灵石盈亏</dt>
-              <dd :class="state.gambling.stats.netSpiritStone >= 0 ? 'record-win' : 'record-lose'">
-                {{ formatSpiritStone(state.gambling.stats.netSpiritStone) }}
+              <dd :class="historyStats.netSpiritStone >= 0 ? 'record-win' : 'record-lose'">
+                {{ formatSpiritStone(historyStats.netSpiritStone) }}
               </dd>
             </div>
             <div>
               <dt>累计悟道值</dt>
-              <dd class="record-win">+{{ state.gambling.stats.totalInsight }}</dd>
+              <dd class="record-win">+{{ historyStats.totalInsight }}</dd>
             </div>
           </dl>
 

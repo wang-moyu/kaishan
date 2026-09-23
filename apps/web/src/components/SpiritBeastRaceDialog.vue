@@ -103,10 +103,13 @@ async function loadRaceState(): Promise<void> {
       notified.value = false;
     }
   } catch {
-    /* ignore polling errors */
+    /* 轮询失败：10 秒后重试 */
+    scheduleNextPoll(10_000);
+    return;
   } finally {
     loading.value = false;
   }
+  scheduleNextPoll();
 }
 
 async function submitBet(): Promise<void> {
@@ -118,6 +121,7 @@ async function submitBet(): Promise<void> {
     emit('state-update', newState);
     race.value = raceData;
     countdown.value = raceData.remainingSeconds;
+    scheduleNextPoll();
     betInput.value = '';
     selectedBeast.value = null;
   } catch (err: unknown) {
@@ -128,19 +132,54 @@ async function submitBet(): Promise<void> {
   }
 }
 
-function startPolling(): void {
+/*
+ * 智能轮询：阶段的结束时间是已知的（remainingSeconds），不必每 5 秒盲查——
+ * - 投注中：每 30 秒刷新一次下注动态，倒计时结束（整点开跑）时立刻补查；
+ * - 封盘（整点刚到、Cron 还没结算完）：每 3 秒查一次，拿到结果即转入 settled；
+ * - 已结算：展示期间不查，到下一轮开盘（x2）时查一次；
+ * - 休赛：到开赛时再查，最长 10 分钟校准一次；
+ * - 标签页在后台：不发请求，切回前台立即补查。
+ * 每轮请求从约 120 次降到约 20 次（每次都要加载一遍宗门快照，读取量随之下降）。
+ */
+const POLL_BETTING_MS = 30_000;
+const POLL_SEALED_MS = 3_000;
+const POLL_MAX_MS = 10 * 60_000;
+/** 阶段边界后多等一会儿再查，给 Cron 结算留出时间。 */
+const POLL_BOUNDARY_SLACK_MS = 1_500;
+
+function nextPollDelay(): number {
+  const data = race.value;
+  if (data === null) return POLL_SEALED_MS;
+  const untilBoundary = data.remainingSeconds * 1000 + POLL_BOUNDARY_SLACK_MS;
+  switch (data.phase) {
+    case 'betting':
+      return Math.min(POLL_BETTING_MS, untilBoundary);
+    case 'sealed':
+      return POLL_SEALED_MS;
+    default:
+      // settled / closed：到下一个阶段边界再查
+      return Math.min(POLL_MAX_MS, untilBoundary);
+  }
+}
+
+function scheduleNextPoll(delayMs = nextPollDelay()): void {
   stopPolling();
-  // 标签页在后台时不轮询（倒计时本地走），切回来后下一个 5 秒内就会补上最新状态。
-  pollTimer = window.setInterval(() => {
-    if (!document.hidden) void loadRaceState();
-  }, 5000);
+  pollTimer = window.setTimeout(() => {
+    pollTimer = undefined;
+    if (document.hidden) return; // 后台不查；切回前台由 onVisibilityChange 补查
+    void loadRaceState();
+  }, delayMs);
 }
 
 function stopPolling(): void {
   if (pollTimer !== undefined) {
-    window.clearInterval(pollTimer);
+    window.clearTimeout(pollTimer);
     pollTimer = undefined;
   }
+}
+
+function onVisibilityChange(): void {
+  if (!document.hidden) void loadRaceState();
 }
 
 function startCountdown(): void {
@@ -253,13 +292,14 @@ watch(() => race.value?.phase, (phase) => {
 
 onMounted(() => {
   void loadRaceState();
-  startPolling();
   startCountdown();
+  document.addEventListener('visibilitychange', onVisibilityChange);
 });
 
 onUnmounted(() => {
   stopPolling();
   stopCountdown();
+  document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
 

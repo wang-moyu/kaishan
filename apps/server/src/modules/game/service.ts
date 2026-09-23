@@ -298,6 +298,7 @@ import {
   type InsightAllocateOutcome,
   type DebateHistoryEntryView,
   type DebateHistoryView,
+  type DebateStatsView,
   type WheelSpinResultView,
   type RaceStateView,
   type RaceBeastView,
@@ -334,7 +335,8 @@ export interface SectSnapshot {
   /** 0019 赌坊：论道当日次数（dateKey + 已用 + 剩余；归一在 gambling.ts 完成）。 */
   debateDay: DebateDayState;
   /** 赌坊战绩汇总（聚合 dao_debate_log）。 */
-  debateStats: DebateStats;
+  /** 赌坊战绩汇总：要扫该宗门全部赌坊记录，只在 /game/debate-history 里计算，快照里不再带。 */
+  debateStats?: DebateStats;
   /** 读快照时库里的最近事件行；本次结算刚触发的在本层另行合并（见 view.ts）。 */
   recentEvents: EventLogRow[];
   /** 0014：本宗未领取的历练记录（在外中 + 待领取）。 */
@@ -442,7 +444,7 @@ export async function listDebateHistory(
 ): Promise<DebateHistoryView> {
   const sect = await new SectRepository(db).findByUserId(userId);
   if (sect === null) {
-    return { entries: [], total: 0, page: 1, pageSize: DEBATE_HISTORY_PAGE_SIZE, totalPages: 1 };
+    return { entries: [], total: 0, page: 1, pageSize: DEBATE_HISTORY_PAGE_SIZE, totalPages: 1, stats: toDebateStatsView(null) };
   }
 
   const countRow = await db
@@ -478,7 +480,21 @@ export async function listDebateHistory(
     createdAt: new Date(Number(row.created_at)).toISOString(),
   }));
 
-  return { entries, total, page: safePage, pageSize: DEBATE_HISTORY_PAGE_SIZE, totalPages };
+  // 战绩汇总只在打开赌坊记录时算一次（每次同步 / 轮询都扫全部记录太费 D1 读取）。
+  const stats = toDebateStatsView(await loadDebateStats(db, sect.id));
+  return { entries, total, page: safePage, pageSize: DEBATE_HISTORY_PAGE_SIZE, totalPages, stats };
+}
+
+function toDebateStatsView(stats: DebateStats | null): DebateStatsView {
+  const s = stats ?? { total: 0, wins: 0, losses: 0, netSpiritStone: 0, totalInsight: 0 };
+  return {
+    total: s.total,
+    wins: s.wins,
+    losses: s.losses,
+    winRate: s.total > 0 ? Math.round((s.wins / s.total) * 100) : 0,
+    netSpiritStone: s.netSpiritStone,
+    totalInsight: s.totalInsight,
+  };
 }
 
 async function loadSnapshot(
@@ -515,7 +531,6 @@ async function loadSnapshot(
   ]);
   // 0019 赌坊：论道当日次数（0019 是新表新列，没有需要按日志窗口兼容核对的旧记录）。
   const debateDay = debateDayStateOf(sect, now);
-  const debateStats = await loadDebateStats(db, sect.id);
   return {
     sect,
     disciples,
@@ -524,7 +539,6 @@ async function loadSnapshot(
     pillInventories,
     challengeDay,
     debateDay,
-    debateStats,
     recentEvents,
     journeys,
     recentJourneys,

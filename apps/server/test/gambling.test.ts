@@ -84,6 +84,13 @@ async function makeSect(prefix: string): Promise<SectFixture> {
   };
 }
 
+/** 赌坊战绩汇总：只随 /game/debate-history 返回（sync 不再下发，省 D1 读取）。 */
+async function debateStatsOf(sect: SectFixture): Promise<Record<string, number>> {
+  const result = await sect.api.get('/api/v1/game/debate-history');
+  expect(result.status).toBe(200);
+  return (dataOf(result) as Record<string, any>).stats as Record<string, number>;
+}
+
 /** 把结算时间拨到未来：请求内的结算变成零产出零事件，完全确定。 */
 async function freezeSettlement(sectId: string): Promise<void> {
   await env.DB.prepare('UPDATE sects SET last_settled_at = ? WHERE id = ?')
@@ -1482,7 +1489,7 @@ describe('天机轮的战绩口径与 0020 迁移约束', () => {
 
     // 天机轮无论输赢都先扣投入，赢的奖励只是「投入 × 倍率」——
     // 净收益必须按 奖励 - 投入 计（只减败北赌注的老口径会在这里虚增一个投入额）。
-    const stats = (await sect.state()).gambling.stats as Record<string, number>;
+    const stats = await debateStatsOf(sect);
     expect(stats).toMatchObject({ total: 1, wins: 1, losses: 0, totalInsight: 0 });
     expect(stats.netSpiritStone).toBe(reward - cost);
   });
@@ -1498,7 +1505,7 @@ describe('天机轮的战绩口径与 0020 迁移约束', () => {
     landOnSlot(slotIndex, slots);
     expect((await spin(sect, tier)).status).toBe(200);
 
-    const stats = (await sect.state()).gambling.stats as Record<string, number>;
+    const stats = await debateStatsOf(sect);
     expect(stats.wins).toBe(1);
     expect(stats.netSpiritStone).toBe(-WHEEL_SPIN_COST * tier);
   });

@@ -520,12 +520,23 @@ export interface DebateHistoryEntryView {
 }
 
 /** 赌坊详细记录（GET /game/debate-history 的 data）：分页 + 条目列表。 */
+/** 赌坊战绩汇总（随 /game/debate-history 返回）。 */
+export interface DebateStatsView {
+  total: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  netSpiritStone: number;
+  totalInsight: number;
+}
+
 export interface DebateHistoryView {
   entries: DebateHistoryEntryView[];
   total: number;
   page: number;
   pageSize: number;
   totalPages: number;
+  stats: DebateStatsView;
 }
 
 /** 单条历练对弟子的归约状态（none = 没有未领取记录）。 */

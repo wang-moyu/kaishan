@@ -1175,6 +1175,8 @@ export interface DebateHistoryPage {
   page: number;
   pageSize: number;
   totalPages: number;
+  /** 战绩汇总（只在这里返回；sync 里的 gambling.stats 已不再下发）。 */
+  stats: NonNullable<SectStateView['gambling']['stats']>;
 }
 
 /** 0019 赌坊详细记录（GET /game/debate-history?page=N）：只读、分页、不结算。 */
