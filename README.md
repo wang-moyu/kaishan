@@ -2,6 +2,8 @@
 
 《开山立派》是一款修仙题材的宗门经营挂机文字网页游戏：从一处散修驻地起步，开山立派，直至仙门至尊，可多人在线。前后端都运行在 Cloudflare 上（Workers + D1），不需要自备服务器。
 
+![宗门主界面](docs/screenshots/sect-overview.png)
+
 ## 玩法简介
 
 - **宗门经营**：弟子在修炼 / 药园 / 采矿 / 采灵岗位上产出资源，离线最多累计 12 小时收益；升级建筑、招募弟子、提升宗门等级（10 级）。
@@ -9,6 +11,15 @@
 - **玩法**：秘境探索、弟子历练、炼丹、宗门挑战、坊市交易。
 - **赌坊**：论道、天机轮、灵兽竞逐（10 分钟一轮的全服竞猜，整点开跑）。
 - **社交**：全服聊天、宗门排行、天骄榜。
+
+## 游戏截图
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/disciple-detail.png" alt="弟子详情"><br><sub>弟子详情：属性、突破与历练</sub></td>
+    <td width="50%"><img src="docs/screenshots/spirit-beast-race.png" alt="灵兽竞逐"><br><sub>赌坊 · 灵兽竞逐</sub></td>
+  </tr>
+</table>
 
 ## 技术栈
 
