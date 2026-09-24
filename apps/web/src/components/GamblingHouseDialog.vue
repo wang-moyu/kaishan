@@ -49,6 +49,8 @@ const emit = defineEmits<{
   'race-state-update': [state: SectStateView];
   /** 灵兽竞逐结果提示。 */
   'race-notify': [tone: 'success' | 'warning', title: string, message: string];
+  /** 灵兽竞逐本轮有待结算的下注（毫秒后开跑结算）。 */
+  'race-bet-pending': [settleInMs: number];
   game: [game: GamblingGame];
 }>();
 
@@ -672,6 +674,7 @@ const RULES_TEXT = `论道赌局 · 玩法说明
         :busy="busy"
         @state-update="onRaceStateUpdate"
         @notify="onRaceNotify"
+        @bet-pending="(ms: number) => emit('race-bet-pending', ms)"
         @back="backToModeSelect"
       />
     </template>

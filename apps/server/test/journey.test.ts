@@ -1089,6 +1089,26 @@ describe('在外弟子的其它写路径一律被服务端拒绝', () => {
     expect(e).toBeTruthy();
   });
 
+  it('在外弟子仍计入晋升宗门的境界条件，晋升不被在外守卫拦下', async () => {
+    const fixture = await makeSect('upgrade');
+    const [a, ...rest] = fixture.discipleIds as [string, ...string[]];
+    // 只留 a 一名筑基（1→2 级恰好需要 1 名筑基），其余降为炼气，让晋升只能靠在外的 a 达标。
+    for (const id of rest) {
+      await env.DB.prepare("UPDATE disciples SET realm_id = 'qiRefining' WHERE id = ?").bind(id).run();
+    }
+    await startOk(fixture, a, 'gathering', 21_600);
+
+    await env.DB.prepare("UPDATE buildings SET level = 2 WHERE sect_id = ? AND def_id = 'spiritualArray'")
+      .bind(fixture.sectId)
+      .run();
+    await setBalance(fixture.sectId, 'spiritStone', 1_000_000);
+    await setBalance(fixture.sectId, 'ore', 1_000_000);
+
+    const upgraded = await fixture.api.post('/api/v1/game/upgrade-sect', {});
+    expect(upgraded.status).toBe(200);
+    expect((dataOf(upgraded) as Record<string, any>).state.sect.level).toBe(2);
+  });
+
   it('在外弟子不会被自动守擂选中（守方实时状态参与裁决）', async () => {
     const fixture = await makeSect('auto');
     const [a, b, c, d, e] = fixture.discipleIds as [string, string, string, string, string];

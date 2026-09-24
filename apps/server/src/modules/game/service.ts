@@ -2459,6 +2459,7 @@ export async function upgradeSect(
   }
 
   // 3. 弟子境界条件；提交时仍需确认用于晋升的弟子没有被并发驱逐。
+  //    在外历练的弟子仍是本宗门人、境界不变，照样计入（界面口径也是如此），所以提交时放行在外成员。
   const requiredDisciples = new Set<string>();
   for (const requirement of next.discipleRequirements) {
     const requiredRealmIndex = realmIndex(requirement.minRealmId);
@@ -2503,7 +2504,9 @@ export async function upgradeSect(
     );
   }
 
-  await draft.commitDisciple([...requiredDisciples].map((id) => ({ id })));
+  await draft.commitDisciple([...requiredDisciples].map((id) => ({ id })), undefined, {
+    allowActiveJourney: true,
+  });
   return draft.view();
 }
 

@@ -133,7 +133,21 @@ function notify(tone: ToastTone, title: string, message: string): void {
   );
 }
 
-function handleError(caught: unknown): void {
+/**
+ * 这些错误说明「界面上的状态与服务端不一致」（资源 / 状态 / 名额在两次同步之间变了）：
+ * 操作失败后立即补一次同步，让界面回到服务端的真实状态，玩家不必手动点「同步」。
+ */
+const RESYNC_ERROR_CODES = new Set([
+  'STATE_CONFLICT',
+  'INSUFFICIENT_RESOURCE',
+  'CAPACITY_FULL',
+  'INVALID_STATUS',
+  'COOLDOWN_ACTIVE',
+  'DAILY_LIMIT',
+  'NOT_FOUND',
+]);
+
+function handleError(caught: unknown, options: { resync?: boolean } = {}): void {
   if (caught instanceof ApiError && caught.status === 401) {
     setCsrfToken(null);
     state.value = null;
@@ -143,6 +157,15 @@ function handleError(caught: unknown): void {
     return;
   }
   notify('error', '操作未完成', caught instanceof Error ? caught.message : '操作失败，请稍后重试。');
+  if (
+    options.resync !== false &&
+    caught instanceof ApiError &&
+    RESYNC_ERROR_CODES.has(caught.code) &&
+    phase.value === 'playing'
+  ) {
+    // 调用方的 finally 还没释放 busy 门闩，放到下一轮事件循环再同步。
+    window.setTimeout(() => void refresh(false), 0);
+  }
 }
 /** 把资源增减渲染成「灵石 +80 · 灵草 -15」这样的摘要。 */
 function effectSummary(effects: Record<string, string>, resources: ResourceView[]): string {
@@ -218,7 +241,8 @@ async function refresh(showNotice = false): Promise<boolean> {
     }
     return true;
   } catch (caught) {
-    handleError(caught);
+    // 同步本身失败不再触发同步，避免循环。
+    handleError(caught, { resync: false });
     return false;
   } finally {
     busy.value = false;
@@ -786,8 +810,9 @@ function onSectCreated(created: SectStateView): void {
 
 onMounted(() => {
   void bootstrap();
-  // 资源与修为由 SectScreen 每秒在本地推算，这里只需低频校正（补随机事件、消除累计误差），
-  // 每 10 分钟一次即可；隐藏标签页不轮询。服务端仍是资源与修为的唯一权威。
+  // 资源与修为由 SectScreen 在本地推算，状态会改变的时刻（资源攒够、修为到门槛、伤愈、竞逐结算）
+  // 也由 SectScreen 按需补同步；这里只是兜底校正（补随机事件等），每 10 分钟一次即可；
+  // 隐藏标签页不轮询。服务端仍是资源与修为的唯一权威。
   syncTimer = window.setInterval(() => {
     if (phase.value === 'playing' && !busy.value && !document.hidden) {
       void refresh(false);

@@ -19,6 +19,8 @@ const emit = defineEmits<{
   back: [];
   /** 结果提示。 */
   notify: [tone: 'success' | 'warning', title: string, message: string];
+  /** 本轮下过注且尚未结算：预计多少毫秒后开跑结算（弹窗关掉后由主界面到点补同步，派奖才会显示）。 */
+  'bet-pending': [settleInMs: number];
 }>();
 
 const RACE_BET_MIN_DISPLAY = 10;
@@ -93,6 +95,7 @@ async function loadRaceState(): Promise<void> {
     const prevRoundKey = race.value?.roundKey;
     race.value = raceData;
     countdown.value = raceData.remainingSeconds;
+    reportPendingBet(raceData);
 
     // 同一轮第一次看到已结算就播动画（Cron 整点结算，轮询可能直接从 betting 跳到 settled）。
     if (prevRoundKey === raceData.roundKey && prevPhase !== 'settled' && raceData.phase === 'settled') {
@@ -112,6 +115,13 @@ async function loadRaceState(): Promise<void> {
   scheduleNextPoll();
 }
 
+/** 本轮有下注、还没结算：上报结算时刻。投注中要等到开跑（Cron 此时结算），封盘时随时会结算。 */
+function reportPendingBet(data: RaceStateView): void {
+  if (data.myBets.length === 0) return;
+  if (data.phase === 'betting') emit('bet-pending', data.remainingSeconds * 1000);
+  else if (data.phase === 'sealed') emit('bet-pending', 0);
+}
+
 async function submitBet(): Promise<void> {
   if (!canBet.value || selectedBeast.value === null) return;
   submitting.value = true;
@@ -121,6 +131,7 @@ async function submitBet(): Promise<void> {
     emit('state-update', newState);
     race.value = raceData;
     countdown.value = raceData.remainingSeconds;
+    reportPendingBet(raceData);
     scheduleNextPoll();
     betInput.value = '';
     selectedBeast.value = null;

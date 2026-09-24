@@ -256,15 +256,21 @@ const exploreRealmLoading = ref(false);
 /** 挑战弹窗的目标宗门（null = 未打开）。 */
 const challengeTarget = ref<PublicSectView | null>(null);
 
-/** 本地平滑显示：每秒按服务端给的产量推进，上限为容量（刷新后以服务端为准）。 */
+/** 本地平滑显示：按服务端给的产量随时间推进，上限为容量（刷新后以服务端为准）。 */
 const liveResources = ref<Record<string, number>>({});
 const liveCultivation = ref<Record<string, number>>({});
 
 /**
- * 本地推进的服务端时钟：以 `state.serverNow` 为基准逐秒前进，绝不用 `Date.now()`。
+ * 本地推进的服务端时钟：以 `state.serverNow` 为基准，加上收到 state 以来真实经过的时间。
  * 历练倒计时与「到期触发一次同步」都读它，保证展示基准始终是服务器时间。
  */
 const localNowMs = ref(Date.parse(props.state.serverNow));
+
+/**
+ * 收到当前 state 的本机时刻。本地推算一律按「现在 − 这个时刻」的真实经过时间计算，
+ * 不做每秒累加：后台标签页的计时器会被浏览器降频、电脑休眠时直接停摆，累加会越算越少。
+ */
+let seededAtMs = Date.now();
 
 /**
  * 已经为哪几条历练请求过同步：到期归队只由服务端结算（刷新后 status 才会变成 ready），
@@ -272,17 +278,39 @@ const localNowMs = ref(Date.parse(props.state.serverNow));
  */
 const journeySyncRequested = new Set<string>();
 
-function seedFromState(): void {
-  liveResources.value = Object.fromEntries(
-    props.state.resources.map((resource) => [resource.id, Number(resource.balance)]),
-  );
-  liveCultivation.value = Object.fromEntries(
-    props.state.disciples.map((disciple) => [disciple.id, disciple.cultivation]),
-  );
-  localNowMs.value = Date.parse(props.state.serverNow);
+function elapsedSinceSeedSeconds(): number {
+  // 本机时钟被往回调时不倒推。
+  return Math.max(0, (Date.now() - seededAtMs) / 1000);
 }
 
-watch(() => props.state, seedFromState, { immediate: true });
+function advanceLive(): void {
+  const elapsed = elapsedSinceSeedSeconds();
+  liveResources.value = Object.fromEntries(
+    props.state.resources.map((resource) => {
+      const balance = Number(resource.balance);
+      const capacity = Number(resource.capacity);
+      // 只阻止增长越界：探索奖励允许把余额顶到容量之上，这里不能把它压回去（否则界面会跳变）。
+      const grown = Math.min(capacity, balance + (Number(resource.ratePerHour) / 3600) * elapsed);
+      return [resource.id, balance >= capacity ? balance : grown];
+    }),
+  );
+  liveCultivation.value = Object.fromEntries(
+    props.state.disciples.map((disciple) => {
+      const threshold = disciple.requiredCultivation;
+      const next = disciple.cultivation + (disciple.cultivationRatePerHour / 3600) * elapsed;
+      return [disciple.id, threshold === null ? next : Math.min(threshold, next)];
+    }),
+  );
+  localNowMs.value = Date.parse(props.state.serverNow) + elapsed * 1000;
+}
+
+function seedFromState(): void {
+  seededAtMs = Date.now();
+  // 拿到了新 state，后台期间攒下的「到点待同步」随之作废。
+  scheduledSyncDue = false;
+  advanceLive();
+  scheduleStateSync();
+}
 
 /** 到期（或已过 ends_at）的在外历练各请求一次同步；能否领取仍由服务端决定。 */
 function syncExpiredJourneys(): void {
@@ -304,30 +332,155 @@ function syncExpiredJourneys(): void {
 }
 
 const timer = window.setInterval(() => {
-  const resources: Record<string, number> = { ...liveResources.value };
-  for (const resource of props.state.resources) {
-    const ratePerSecond = Number(resource.ratePerHour) / 3600;
-    const capacity = Number(resource.capacity);
-    // 只阻止增长越界：探索奖励允许把余额顶到容量之上，这里不能把它压回去（否则界面会跳变）。
-    const current = resources[resource.id] ?? 0;
-    resources[resource.id] = current >= capacity ? current : Math.min(capacity, current + ratePerSecond);
-  }
-  liveResources.value = resources;
-
-  const cultivation: Record<string, number> = { ...liveCultivation.value };
-  for (const disciple of props.state.disciples) {
-    const threshold = disciple.requiredCultivation;
-    const next = (cultivation[disciple.id] ?? 0) + disciple.cultivationRatePerHour / 3600;
-    cultivation[disciple.id] = threshold === null ? next : Math.min(threshold, next);
-  }
-  liveCultivation.value = cultivation;
-
-  localNowMs.value += 1000;
+  advanceLive();
   syncExpiredJourneys();
 }, 1000);
 
-/** 离开超过这个时长再切回标签页才补同步；短暂切走不发请求（本地推算足够准确）。 */
-const RESYNC_AFTER_HIDDEN_MS = 5 * 60_000;
+/*
+ * 按需同步。App.vue 每 10 分钟才定时同步一次；两次同步之间数字在本地推算，
+ * 但「能不能点」（canUpgrade / canCraft / canBreakthrough / 疗伤）仍停在上次同步那一刻。
+ * 这里算出下一个「状态会改变」的时刻，到点补一次同步：
+ * - 某个当前不可用的操作（晋升宗门 / 建筑升级 / 破境 / 炼丹）按产量刚好攒够所需资源；
+ * - 弟子修为到达突破门槛、伤势痊愈；
+ * - 本轮灵兽竞逐下过注：结算后同步一次（派奖由 Cron 直接入账，不经过本页面的任何请求）。
+ * 能否操作仍全部由服务端判定，这里只决定「什么时候去问」；距上次写库不足 5 分钟的
+ * /game/sync 在服务端只读不写，代价很小。
+ */
+/** 到点后多等一会儿再同步，避开服务端结算的取整误差。 */
+const SCHEDULED_SYNC_SLACK_MS = 2_000;
+/** 两次按需同步的最小间隔：取整误差让同一时刻反复「差一点」时，不会连续打请求。 */
+const SCHEDULED_SYNC_MIN_INTERVAL_MS = 15_000;
+/** 超过这个时长的时刻不排：App.vue 的定时同步会先到，届时重新计算。 */
+const SCHEDULED_SYNC_MAX_DELAY_MS = 30 * 60_000;
+/** 灵兽竞逐开跑后多等一会儿，给 Cron 结算留出时间。 */
+const RACE_SETTLE_SLACK_MS = 20_000;
+
+let scheduledSyncTimer: number | undefined;
+let lastScheduledSyncAt = 0;
+/** 到点时标签页在后台：记下来，切回前台时补同步。 */
+let scheduledSyncDue = false;
+/** 下过注的那一轮预计结算完成的本机时刻；null = 没有待结算的下注。 */
+let raceSettleAtMs: number | null = null;
+
+/**
+ * 按快照里的产量，把一份成本攒够还要多少秒。
+ * 快照里已经够了（当前不可用另有原因）或永远攒不够（没有产量 / 超过容量）时返回 null。
+ */
+function secondsUntilAffordable(cost: Record<string, string> | null): number | null {
+  if (cost === null) return null;
+  let wait = 0;
+  for (const [resourceId, amount] of Object.entries(cost)) {
+    const resource = props.state.resources.find((item) => item.id === resourceId);
+    if (resource === undefined) return null;
+    const need = Number(amount);
+    const balance = Number(resource.balance);
+    if (balance >= need) continue;
+    const ratePerSecond = Number(resource.ratePerHour) / 3600;
+    if (ratePerSecond <= 0 || need > Number(resource.capacity)) return null;
+    wait = Math.max(wait, (need - balance) / ratePerSecond);
+  }
+  return wait > 0 ? wait : null;
+}
+
+/** 距离下一个「服务端判定会改变」的时刻还有多少秒（相对收到 state 的时刻）；没有则返回 null。 */
+function secondsUntilStateChange(): number | null {
+  const state = props.state;
+  const waits: number[] = [];
+  const push = (wait: number | null): void => {
+    if (wait !== null && wait > 0) waits.push(wait);
+  };
+
+  if (state.sectUpgrade !== null && !state.sectUpgrade.canUpgrade) {
+    push(secondsUntilAffordable(state.sectUpgrade.cost));
+  }
+  for (const building of state.buildings) {
+    if (!building.canUpgrade) push(secondsUntilAffordable(building.upgradeCost));
+  }
+  if (state.alchemy.unlocked) {
+    for (const recipe of state.alchemy.recipes) {
+      if (!recipe.canCraft) push(secondsUntilAffordable(recipe.cost));
+    }
+  }
+
+  const serverNow = Date.parse(state.serverNow);
+  for (const disciple of state.disciples) {
+    const injuryWait =
+      disciple.injuredUntil === null ? 0 : Math.max(0, (Date.parse(disciple.injuredUntil) - serverNow) / 1000);
+    push(injuryWait);
+    const threshold = disciple.requiredCultivation;
+    if (disciple.canBreakthrough || threshold === null) continue;
+    // 破境要同时满足：伤愈、修为到门槛、灵气够；三者都到位的那一刻才可能变成可破境。
+    let cultivationWait = 0;
+    if (disciple.cultivation < threshold) {
+      if (disciple.cultivationRatePerHour <= 0) continue;
+      cultivationWait = (threshold - disciple.cultivation) / (disciple.cultivationRatePerHour / 3600);
+    }
+    const energyWait = secondsUntilAffordable({ spiritualEnergy: disciple.breakthroughCost }) ?? 0;
+    push(Math.max(injuryWait, cultivationWait, energyWait));
+  }
+
+  return waits.length === 0 ? null : Math.min(...waits);
+}
+
+function scheduleStateSync(): void {
+  if (scheduledSyncTimer !== undefined) window.clearTimeout(scheduledSyncTimer);
+  scheduledSyncTimer = undefined;
+  // 当前 state 已经是结算之后拿到的（例如竞逐弹窗自己轮询到了结果），不必再补。
+  if (raceSettleAtMs !== null && raceSettleAtMs <= seededAtMs) raceSettleAtMs = null;
+
+  const targets: number[] = [];
+  const wait = secondsUntilStateChange();
+  if (wait !== null) targets.push(seededAtMs + wait * 1000 + SCHEDULED_SYNC_SLACK_MS);
+  if (raceSettleAtMs !== null) targets.push(raceSettleAtMs);
+  if (targets.length === 0) return;
+
+  const target = Math.max(Math.min(...targets), lastScheduledSyncAt + SCHEDULED_SYNC_MIN_INTERVAL_MS);
+  const delay = Math.max(0, target - Date.now());
+  if (delay > SCHEDULED_SYNC_MAX_DELAY_MS) return;
+  scheduledSyncTimer = window.setTimeout(runScheduledSync, delay);
+}
+
+function runScheduledSync(): void {
+  scheduledSyncTimer = undefined;
+  if (document.hidden) {
+    scheduledSyncDue = true;
+    return;
+  }
+  if (props.busy) {
+    // 有写请求在途：它返回的 state 会重新排期；万一失败，稍后再试一次。
+    scheduledSyncTimer = window.setTimeout(runScheduledSync, 3_000);
+    return;
+  }
+  lastScheduledSyncAt = Date.now();
+  emit('refresh');
+}
+
+/** 竞逐弹窗上报：本轮下过注，预计 settleInMs 毫秒后开跑结算。 */
+function onRaceBetPending(settleInMs: number): void {
+  raceSettleAtMs = Date.now() + settleInMs + RACE_SETTLE_SLACK_MS;
+  scheduleStateSync();
+}
+
+/**
+ * 界面按快照判定「资源不足」，但本地推算已经攒够了：说明判定过时了（通常按需同步会先一步到，
+ * 这里是兜底）。返回 true 时已发起同步，调用方不必再提示快照里的旧原因。
+ */
+function resyncIfCostNowAffordable(cost: Record<string, string> | null): boolean {
+  // 快照里本来就够（不可用另有原因）或永远攒不够：不是过时判定，照常提示。
+  if (cost === null || secondsUntilAffordable(cost) === null) return false;
+  const affordable = Object.entries(cost).every(
+    ([resourceId, amount]) => (liveResources.value[resourceId] ?? 0) >= Number(amount),
+  );
+  if (!affordable) return false;
+  emit('refresh');
+  emit('notify', 'info', '正在同步宗门状态', '资源已经攒够，同步完成后即可再次操作。');
+  return true;
+}
+
+watch(() => props.state, seedFromState, { immediate: true });
+
+/** 离开超过这个时长再切回标签页就补同步（另一台设备上的操作、后台期间的入账都靠它校正）。 */
+const RESYNC_AFTER_HIDDEN_MS = 60_000;
 let hiddenAt: number | null = null;
 
 /** 切回标签页时按需补一次同步（App.vue 的低频轮询在隐藏标签页里不跑）。 */
@@ -336,9 +489,12 @@ function onVisibilityChange(): void {
     hiddenAt = Date.now();
     return;
   }
+  advanceLive();
   const awayMs = hiddenAt === null ? 0 : Date.now() - hiddenAt;
   hiddenAt = null;
-  if (props.busy || awayMs < RESYNC_AFTER_HIDDEN_MS) return;
+  if (props.busy) return;
+  if (!scheduledSyncDue && awayMs < RESYNC_AFTER_HIDDEN_MS) return;
+  scheduledSyncDue = false;
   emit('refresh');
 }
 
@@ -348,6 +504,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.clearInterval(timer);
+  if (scheduledSyncTimer !== undefined) window.clearTimeout(scheduledSyncTimer);
   document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 
@@ -531,6 +688,7 @@ async function onRecruitChoose(choice: number): Promise<void> {
 function requestUpgrade(building: BuildingView): void {
   if (props.busy) return;
   if (!building.canUpgrade) {
+    if (resyncIfCostNowAffordable(building.upgradeCost)) return;
     emit('notify', 'warning', `${building.name}暂不可升级`, building.blockedReason ?? '当前条件尚未满足。');
     return;
   }
@@ -541,6 +699,7 @@ function requestUpgradeSect(): void {
   const upgrade = props.state.sectUpgrade;
   if (props.busy || upgrade === null) return;
   if (!upgrade.canUpgrade) {
+    if (resyncIfCostNowAffordable(upgrade.cost)) return;
     emit('notify', 'warning', `暂不可晋升${upgrade.nextLevelName}`, upgrade.blockedReason ?? '当前条件尚未满足。');
     return;
   }
@@ -1405,6 +1564,7 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
         @wheel-reveal="onWheelRevealed"
         @race-state-update="(s: SectStateView) => emit('recruited', s)"
         @race-notify="onRaceNotify"
+        @race-bet-pending="onRaceBetPending"
         @game="onGamblingGame"
         @close="onCloseGambling"
         @reveal="onGamblingRevealed"
