@@ -163,7 +163,10 @@ function formatReward(entry: DebateHistoryEntry): string {
       return `${resName} +${String(amount)}`;
     }
     if (detail.type === 'insight') {
-      return `悟道值 +${String(detail.insight)}`;
+      const overflow = Number(detail.overflowStone ?? 0) / UNITS_PER_DISPLAY;
+      return overflow > 0
+        ? `悟道值 +${String(detail.insight)}（溢出折合灵石 +${String(overflow)}）`
+        : `悟道值 +${String(detail.insight)}`;
     }
     if (detail.type === 'pill') {
       // 0020 天机轮的丹药格：数量随投入档位走，名字仍从服务端名词表查。
@@ -258,13 +261,41 @@ const dailyLimit = computed(() => props.state.gambling.dailyLimit);
 /** 当前模式的必填项是否齐全（只有自由输入可能缺数量，其余两种都在白名单里选）。 */
 const modeConfigured = computed(() => (betMode.value === 'free_resource' ? freeAmountValid.value : true));
 
+/**
+ * 悟道值额度：该弟子还能再收多少 = 剩余可分配额度 − 未分配余额（与服务端 daoInsightRoom 同口径）。
+ * 只赢悟道值的玩法（预设选悟道值 / 属性赌注）在额度为 0 时不能下注；额度不够时超出部分折灵石。
+ */
+const selectedDisciple = computed(
+  () => props.state.disciples.find((disciple) => disciple.id === selectedDiscipleId.value) ?? null,
+);
+const winsInsight = computed(
+  () => betMode.value === 'attribute' || (betMode.value === 'preset_spirit_stone' && rewardType.value === 'insight'),
+);
+const insightReward = computed(() =>
+  betMode.value === 'attribute' ? ATTRIBUTE_INSIGHT_DISPLAY[multiplier.value] : PRESET_INSIGHT_DISPLAY[multiplier.value],
+);
+const insightRoom = computed(() => {
+  const d = selectedDisciple.value;
+  return d === null ? null : Math.max(0, d.daoInsightRemaining - d.daoInsight);
+});
+const insightFull = computed(() => winsInsight.value && insightRoom.value === 0);
+/** 额度不够时的折算提示（每点折灵石 180，与服务端 DAO_INSIGHT_OVERFLOW_STONE 同口径）。 */
+const insightOverflowHint = computed(() => {
+  if (!winsInsight.value || insightRoom.value === null || insightRoom.value <= 0) return null;
+  const overflow = insightReward.value - insightRoom.value;
+  return overflow > 0
+    ? `该弟子最多再收 ${String(insightRoom.value)} 点悟道值，赢了超出的 ${String(overflow)} 点折合灵石 +${String(overflow * 180)}。`
+    : null;
+});
+
 const canSubmit = computed(
   () =>
     unlocked.value &&
     !props.busy &&
     remaining.value > 0 &&
     selectedDiscipleId.value !== null &&
-    modeConfigured.value,
+    modeConfigured.value &&
+    !insightFull.value,
 );
 
 /** 组装本次请求：按 betMode 只带各自的必填字段（多余字段会被服务端 400 拒绝）。 */
@@ -610,6 +641,10 @@ const RULES_TEXT = `论道赌局 · 玩法说明
         </button>
         <p v-if="remaining <= 0" class="blocked-hint">今日赌坊次数已用尽（论道与天机轮共享），明日再来。</p>
         <p v-else-if="!modeConfigured" class="blocked-hint">请先填写合法的押注数量。</p>
+        <p v-else-if="insightFull" class="blocked-hint">
+          {{ selectedDisciple?.name }}的悟道值已满（已分配 + 未分配已达上限），请改选灵石奖励或换一名弟子。
+        </p>
+        <p v-else-if="insightOverflowHint" class="gambling-stake-hint">{{ insightOverflowHint }}</p>
       </template>
     </template>
 

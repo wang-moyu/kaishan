@@ -1,3 +1,4 @@
+import { DbQueryError, toSafeDbError } from '../../infra/db/errors';
 import { ParamRepository } from '../../infra/db/repository';
 
 /**
@@ -60,6 +61,31 @@ export class UserRepository extends ParamRepository {
       sql: 'UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?',
       params: [passwordHash, now, userId],
     });
+  }
+
+  /**
+   * 改密码：新哈希与「撤销该账号除当前会话外的全部会话」放在同一个 batch，
+   * 不会出现密码已改、旧设备却仍在线的半写状态。返回被撤销的会话数。
+   */
+  async changePasswordAndRevokeOthers(
+    userId: string,
+    passwordHash: string,
+    keepSessionId: string,
+    now: number,
+  ): Promise<number> {
+    try {
+      const [, revoked] = await this.db.batch([
+        this.db
+          .prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?')
+          .bind(passwordHash, now, userId),
+        this.db
+          .prepare('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id <> ? AND revoked_at IS NULL')
+          .bind(now, userId, keepSessionId),
+      ]);
+      return revoked?.meta.changes ?? 0;
+    } catch (error) {
+      throw new DbQueryError(toSafeDbError(error), error);
+    }
   }
 
   async countAll(): Promise<number> {

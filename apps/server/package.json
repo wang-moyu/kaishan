@@ -3,12 +3,14 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Cloudflare Workers + Hono 后端",
+  "description": "Hono 后端：Cloudflare Workers + D1，或 Node + SQLite（见 node/）",
   "scripts": {
     "dev": "wrangler dev --persist-to .wrangler/state/dev",
     "build": "wrangler deploy --dry-run --outdir dist",
     "cf:types": "wrangler types",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p node/tsconfig.json",
+    "build:node": "node node/build.mjs",
+    "start:node": "node --disable-warning=ExperimentalWarning dist-node/server.mjs",
     "db:check:local-binding": "node ../../scripts/db/check-local-binding.mjs --config ./wrangler.jsonc",
     "db:migrate:local": "wrangler d1 migrations apply DB --local --persist-to .wrangler/state/dev",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote --config wrangler.production.jsonc",
@@ -25,6 +27,8 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@hono/node-server": "^1.19.17",
+    "esbuild": "^0.28.1",
     "wrangler": "4.133.0"
   }
 }

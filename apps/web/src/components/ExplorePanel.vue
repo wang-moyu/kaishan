@@ -174,6 +174,9 @@ function realmGlyph(realmId: string): string {
             <span v-for="(amount, resourceId) in realm.rewards" :key="resourceId" class="reward-tag is-gain">
               {{ resourceNameMap[resourceId] ?? resourceId }} {{ formatAmount(amount) }}
             </span>
+            <span v-if="realm.bonusDropText" class="reward-tag is-gain" title="探索成功时按概率额外掉落">
+              概率 {{ realm.bonusDropText }}
+            </span>
             <span class="tag-label">消耗</span>
             <span v-for="(amount, resourceId) in realm.entryCost" :key="resourceId" class="reward-tag is-cost">
               {{ resourceNameMap[resourceId] ?? resourceId }} {{ formatAmount(amount) }}

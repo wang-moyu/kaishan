@@ -9,7 +9,7 @@ import { formatAmount } from '../utils/format';
  * 两个相互冲突的服药入口）。
  *
  * 规则全部以服务端算好的 alchemy 字段为准：unlocked、canCraft、blockedReason 都不在前端复算；
- * 前端只做数量步进（1~5）与按钮派发。
+ * 前端只做数量选择（1~服务端下发的上限）与按钮派发。
  */
 const props = defineProps<{
   state: SectStateView;
@@ -21,19 +21,51 @@ const emit = defineEmits<{
 }>();
 
 const QUANTITY_MIN = 1;
-const QUANTITY_MAX = 5;
+const quantityMax = computed(() => props.state.alchemy.maxCraftQuantity);
 
-/** 每个配方的炼制数量（1~5，默认 1）。 */
+/** 每个配方的炼制数量（1~上限，默认 1）。 */
 const quantities = ref<Record<string, number>>(
   Object.fromEntries(props.state.alchemy.recipes.map((recipe) => [recipe.id, 1])),
 );
 
+function setQuantity(pillId: string, value: number): void {
+  const clamped = Number.isFinite(value)
+    ? Math.min(quantityMax.value, Math.max(QUANTITY_MIN, Math.floor(value)))
+    : QUANTITY_MIN;
+  quantities.value = { ...quantities.value, [pillId]: clamped };
+}
+
 function stepQuantity(pillId: string, delta: number): void {
-  const current = quantities.value[pillId] ?? QUANTITY_MIN;
-  quantities.value = {
-    ...quantities.value,
-    [pillId]: Math.min(QUANTITY_MAX, Math.max(QUANTITY_MIN, current + delta)),
-  };
+  setQuantity(pillId, (quantities.value[pillId] ?? QUANTITY_MIN) + delta);
+}
+
+function onQuantityInput(pillId: string, event: Event): void {
+  const input = event.target as HTMLInputElement;
+  // 输入过程中允许清空，失焦时再归一（见 onQuantityBlur）。
+  if (input.value.trim() === '') return;
+  setQuantity(pillId, Number(input.value));
+}
+
+function onQuantityBlur(pillId: string, event: Event): void {
+  const input = event.target as HTMLInputElement;
+  setQuantity(pillId, Number(input.value));
+  input.value = String(quantities.value[pillId] ?? QUANTITY_MIN);
+}
+
+/** 按当前余额最多能炼几颗（封顶到上限）；一颗都炼不起时返回 0。 */
+function affordableQuantity(recipe: AlchemyRecipeView): number {
+  let most = quantityMax.value;
+  for (const [resourceId, amount] of Object.entries(recipe.cost)) {
+    const unit = Number(amount);
+    if (unit <= 0) continue;
+    most = Math.min(most, Math.floor((resourceBalance.value[resourceId] ?? 0) / unit));
+  }
+  return Math.max(0, most);
+}
+
+/** 「最大」：选到当前资源能炼的最多颗数（一颗都炼不起时停在 1，由炼制按钮提示资源不足）。 */
+function selectMaxQuantity(recipe: AlchemyRecipeView): void {
+  setQuantity(recipe.id, Math.max(QUANTITY_MIN, affordableQuantity(recipe)));
 }
 
 const resourceName = computed<Record<string, string>>(() =>
@@ -115,14 +147,32 @@ function onCraft(recipe: AlchemyRecipeView): void {
                 aria-label="减少一颗"
                 @click="stepQuantity(recipe.id, -1)"
               >−</button>
-              <span aria-live="polite">{{ quantities[recipe.id] ?? 1 }}</span>
+              <input
+                class="alchemy-quantity-input"
+                type="number"
+                inputmode="numeric"
+                :min="1"
+                :max="quantityMax"
+                :value="quantities[recipe.id] ?? 1"
+                :disabled="busy"
+                :aria-label="`炼制数量 · ${recipe.name}`"
+                @input="onQuantityInput(recipe.id, $event)"
+                @blur="onQuantityBlur(recipe.id, $event)"
+              />
               <button
                 type="button"
-                :disabled="busy || (quantities[recipe.id] ?? 1) >= 5"
+                :disabled="busy || (quantities[recipe.id] ?? 1) >= quantityMax"
                 aria-label="增加一颗"
                 @click="stepQuantity(recipe.id, 1)"
               >+</button>
             </div>
+            <button
+              class="alchemy-max-button"
+              type="button"
+              :disabled="busy || affordableQuantity(recipe) < 1"
+              :title="`按当前资源最多可炼 ${affordableQuantity(recipe)} 颗`"
+              @click="selectMaxQuantity(recipe)"
+            >最大</button>
             <button
               class="action-button primary-action alchemy-craft-button"
               :class="{ 'is-disabled': !canCraftSelected(recipe) }"

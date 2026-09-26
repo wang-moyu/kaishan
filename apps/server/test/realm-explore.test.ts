@@ -305,11 +305,14 @@ describe('V6 秘境探索：开始', () => {
     expect(await explorationRowCount(fixture.sectId)).toBe(1);
   });
 
-  it('没有演武场时不能开始', async () => {
-    const fixture = await makeSect('v6-no-arena', { arena: false });
+  it('没有演武场时不能开始（前两个秘境不需要演武场）', async () => {
+    const fixture = await makeSect('v6-no-arena', { arena: false, level: 3 });
     await freezeSettlement(fixture.sectId);
-    const result = await startExplore(fixture, MISTY.realmId);
-    expect(errorOf(result).code).toBe('INVALID_STATUS');
+    // 坠星深渊（宗门 3 级）起才要求演武场；迷雾森林不再要求（见 realms.ts 的 requiresArena）。
+    const blocked = await startExplore(fixture, 'fallenStarAbyss');
+    expect(errorOf(blocked).code).toBe('INVALID_STATUS');
+    expect(errorOf(blocked).message).toContain('演武场');
+    expect((await startExplore(fixture, MISTY.realmId)).status).toBe(200);
   });
 });
 

@@ -84,8 +84,8 @@ export const BREAKTHROUGH_ARRAY_BONUS_BP_PER_LEVEL = 500;
 /** 聚灵阵的建筑定义 id（加成来源）。 */
 export const SPIRITUAL_ARRAY_BUILDING_ID = 'spiritualArray';
 
-/** 聚灵阵每级给灵气基础产出的加成（基点，2000 = +20%）。 */
-export const SPIRITUAL_ARRAY_ENERGY_BONUS_BP_PER_LEVEL = 2000;
+/** 聚灵阵每级给灵气基础产出的加成（基点，4000 = +40%；v8 由 +20% 提高）。 */
+export const SPIRITUAL_ARRAY_ENERGY_BONUS_BP_PER_LEVEL = 4000;
 
 /** 空闲岗位 id（不在配置里，属于弟子状态的枚举值）。 */
 export const IDLE_ASSIGNMENT = 'idle';
@@ -180,7 +180,7 @@ export const SECT_LEVELS: readonly SectLevelDef[] = [
     upgradeCost: { spiritStone: '200000', ore: '100000' },
     buildingRequirements: [{ defId: 'spiritualArray', minLevel: 2 }],
     discipleRequirements: [{ minRealmId: 'foundationEstablishment', count: 1 }],
-    unlockBuildings: ['scriptureLibrary'],
+    unlockBuildings: ['scriptureLibrary', 'forgeWorkshop'],
   },
   {
     level: 3,
@@ -329,6 +329,26 @@ export const STONE_MINING_LIMIT_HIGH = 2;
 /** 采灵岗位人数上限提到 high 的宗门等级门槛。 */
 export const STONE_MINING_UNLOCK_SECT_LEVEL = 6;
 
+/** 吐纳（产灵气）岗位 id：对应配置里的 positions.id（v8）。 */
+export const ENERGY_GATHERING_ASSIGNMENT = 'energyGathering';
+
+/** 吐纳岗位人数上限（不分宗门等级）。 */
+export const ENERGY_GATHERING_LIMIT = 2;
+
+/**
+ * 有人数上限的岗位：返回该宗门等级下的上限；不限人数的岗位返回 null。
+ * 派工校验（service）与岗位列表视图（view）共用这一份。
+ */
+export function assignmentLimitOf(assignment: string, sectLevel: number): number | null {
+  if (assignment === STONE_MINING_ASSIGNMENT) {
+    return sectLevel >= STONE_MINING_UNLOCK_SECT_LEVEL ? STONE_MINING_LIMIT_HIGH : STONE_MINING_LIMIT_LOW;
+  }
+  if (assignment === ENERGY_GATHERING_ASSIGNMENT) {
+    return ENERGY_GATHERING_LIMIT;
+  }
+  return null;
+}
+
 /**
  * 天赋定义（V4 第二节）。天赋是代码常量，不进 game-config：
  * 每个弟子的 talent 列存 id，这里的映射负责展示名与加成对象。
@@ -373,3 +393,33 @@ export const DEFENSE_LINEUP_SIZE = 3;
  * 刷新免费（不消耗资源，也不消耗每日招募次数），只换一批候选人。
  */
 export const RECRUIT_REFRESH_PER_LEVEL = 3;
+
+/* ---------- 世界 Boss 二期 · 阶段一：重伤 ---------- */
+
+/** 重伤持续时间：1 天（被世界 Boss 打成重伤后要静养这么久）。 */
+export const SEVERE_INJURY_MS = 1 * 86_400_000;
+
+/** 该弟子此刻是否重伤卧床（未填 / 已过期都算未重伤）。 */
+export function isSeverelyInjured(severeInjuredUntil: number | null, now: number): boolean {
+  return severeInjuredUntil !== null && Number(severeInjuredUntil) > now;
+}
+
+/**
+ * 重伤剩余时间的短文案（服务端错误信息用）：
+ * 满 1 天 → 「2天5时」；满 1 小时 → 「5时20分」；否则 → 「18分」。
+ * 前端的 apps/web/src/utils/format.ts 里 severeInjuryLeftText 保持同一格式。
+ */
+export function severeInjuryLeftText(until: number, now: number): string {
+  const minutes = Math.ceil(Math.max(0, until - now) / 60_000);
+  if (minutes >= 60 * 24) {
+    const days = Math.floor(minutes / (60 * 24));
+    const hours = Math.floor((minutes % (60 * 24)) / 60);
+    return `${String(days)}天${String(hours)}时`;
+  }
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return `${String(hours)}时${String(rest)}分`;
+  }
+  return `${String(Math.max(1, minutes))}分`;
+}

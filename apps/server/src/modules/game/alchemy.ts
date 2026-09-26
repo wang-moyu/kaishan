@@ -16,6 +16,10 @@ export const ALCHEMY_UNLOCK_BUILDING_ID = 'herbGarden';
 export const ALCHEMY_UNLOCK_BUILDING_LEVEL = 2;
 /** 每名弟子最多服用淬体丹次数。 */
 export const BODY_TEMPERING_MAX_USES = 10;
+/** 单次炼制的数量上限（成本按数量线性相乘，写库语句数与数量无关）。 */
+export const MAX_CRAFT_QUANTITY = 99;
+/** 单次服药请求的颗数上限（服务端还会按「服到满所需」与库存再截断）。 */
+export const MAX_PILL_USE_COUNT = 1000;
 /** 聚气丹每颗增加的当前阶段修为。 */
 export const CULTIVATION_PILL_GAIN = 120;
 
@@ -149,4 +153,45 @@ export function bodyTemperingTarget(
     }
   }
   return best;
+}
+
+/**
+ * 聚气丹「服到满」需要几颗：服到修为恰好达到突破门槛（最后一颗可能只生效一部分）。
+ * 已达门槛或已是本版本最高阶段（门槛为 null）返回 0。
+ */
+export function cultivationPillsToFull(cultivation: number, requiredCultivation: number | null): number {
+  if (requiredCultivation === null || cultivation >= requiredCultivation) {
+    return 0;
+  }
+  return Math.ceil((requiredCultivation - cultivation) / CULTIVATION_PILL_GAIN);
+}
+
+export interface BodyTemperingStep {
+  attribute: PillAttribute;
+  gain: number;
+}
+
+/**
+ * 淬体丹连服计划：从当前属性出发逐颗补短板（每颗都按补完上一颗后的属性重新选短板），
+ * 直到服满 BODY_TEMPERING_MAX_USES 次、没有短板，或达到 maxPills 颗。
+ * 每颗提升至少 1 且次数有上限，循环必然结束。
+ */
+export function bodyTemperingPlan(
+  attack: number,
+  defense: number,
+  speed: number,
+  uses: number,
+  maxPills = BODY_TEMPERING_MAX_USES,
+): BodyTemperingStep[] {
+  const values: Record<PillAttribute, number> = { attack, defense, speed };
+  const steps: BodyTemperingStep[] = [];
+  while (uses + steps.length < BODY_TEMPERING_MAX_USES && steps.length < maxPills) {
+    const target = bodyTemperingTarget(values.attack, values.defense, values.speed);
+    if (target === null) {
+      break;
+    }
+    values[target.attribute] += target.gain;
+    steps.push({ attribute: target.attribute, gain: target.gain });
+  }
+  return steps;
 }

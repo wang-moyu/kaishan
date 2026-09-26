@@ -3,6 +3,12 @@ node_modules/
 
 # 构建产物
 dist/
+apps/server/dist-node/
+
+# Node 版本地运行的数据与配置（HOME = apps/server）
+apps/server/data/
+apps/server/backups/
+apps/server/.env
 *.tsbuildinfo
 
 # Wrangler 本地状态（.wrangler/state、临时构建缓存）

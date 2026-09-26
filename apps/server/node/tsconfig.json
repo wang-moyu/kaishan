@@ -1,0 +1,8 @@
+{
+  // Node 版入口单独类型检查：Node 类型 + Workers 生成的 Env / D1 类型（业务代码仍按 D1Database 编写）。
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["./*.ts", "../worker-configuration.d.ts", "../src/env-secrets.d.ts"]
+}

@@ -575,6 +575,8 @@ export function journeyBaseRewardForDisciple(
     durationSeconds,
     aptitude: disciple.aptitude,
     talent: disciple.talent,
+    // 0028 装备：历练**不计入装备**（计划 1.2 明列）—— 这里的战力 / 幸运 / 体魄都是基础属性，
+    // 调用方（service.journeyRewardInputOf）传进来的就是弟子表上的基础属性，不含装备加成。
     combatPower: discipleCombatPower(
       disciple.realmId,
       disciple.stage,

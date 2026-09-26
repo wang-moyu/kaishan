@@ -120,8 +120,11 @@ export function findSecretRealm(realmId: string): SecretRealmDef | undefined {
  * 单个弟子战力（V4 第三节）。
  * base = (境界序号×3 + 阶段) × 10
  * 属性加权 = (attack×0.4 + defense×0.35 + speed×0.25) / 100
- * power = base × (1 + 属性加权)；战斗天赋再 ×1.15
+ * power = base × (1 + 属性加权) × (1 + 装备战力加成)；战斗天赋再 ×1.15
  * 例：炼气一层 = (0×3+1)×10 = 10，金丹三层 = (2×3+3)×10 = 90。
+ *
+ * 装备战力加成（基点，见 equipment.ts 的 powerBonusBp）由调用方按「计入装备」的口径传入；
+ * 不计入装备的场景（历练、关卡血量预估）不传，按 0 算，结果与加这一项之前完全一致。
  */
 export function discipleCombatPower(
   realmId: string,
@@ -130,11 +133,12 @@ export function discipleCombatPower(
   defense: number,
   speed: number,
   talent?: string,
+  gearPowerBonusBp = 0,
 ): number {
   const rIdx = realmIndex(realmId);
   const base = (rIdx * 3 + stage) * 10;
   const attrBonus = (attack * 0.4 + defense * 0.35 + speed * 0.25) / 100;
-  let power = Math.floor(base * (1 + attrBonus));
+  let power = Math.floor(base * (1 + attrBonus) * (1 + gearPowerBonusBp / 10_000));
   if (talent === 'combat') {
     power = Math.floor(power * 1.15);
   }
@@ -150,10 +154,14 @@ export function partyCombatPower(
     defense: number;
     speed: number;
     talent?: string;
+    /** 装备战力加成（基点）；不计入装备时省略。 */
+    gearPowerBonusBp?: number;
   }[],
 ): number {
   return members.reduce(
-    (sum, m) => sum + discipleCombatPower(m.realmId, m.stage, m.attack, m.defense, m.speed, m.talent),
+    (sum, m) =>
+      sum +
+      discipleCombatPower(m.realmId, m.stage, m.attack, m.defense, m.speed, m.talent, m.gearPowerBonusBp),
     0,
   );
 }

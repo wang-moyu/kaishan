@@ -1072,6 +1072,16 @@ describe('0018 迁移：disciples 重建后结构与约束完好', () => {
       // 0019 赌坊：0019 在 0018 重建之后追加的悟道值两列。
       'dao_insight',
       'dao_insight_used',
+      // 0026 世界 Boss 二期：0018 重建之后由 0026 追加的重伤列。
+      'severe_injured_until',
+      // 0028 装备：0018 重建之后追加的 5 个装备加成列（NOT NULL DEFAULT 0）。
+      'gear_attack',
+      'gear_defense',
+      'gear_speed',
+      'gear_luck',
+      'gear_physique',
+      // 0032 装备战力加成：第 6 个冗余列（NOT NULL DEFAULT 0）。
+      'gear_power_bp',
     ]);
   });
 
@@ -1119,6 +1129,16 @@ describe('0018 迁移：disciples 重建后结构与约束完好', () => {
       // 0019 赌坊：悟道值两列在 0018 重建之后由 0019 追加（列定义见 0019 迁移）。
       'dao_insight|INTEGER|1|0',
       'dao_insight_used|INTEGER|1|0',
+      // 0026 世界 Boss 二期：重伤列在 0018 重建之后追加，可空（NULL = 未重伤）、无 DEFAULT。
+      'severe_injured_until|INTEGER|0|',
+      // 0028 装备：5 个装备加成列都是 NOT NULL DEFAULT 0（旧行由 DEFAULT 补齐）。
+      'gear_attack|INTEGER|1|0',
+      'gear_defense|INTEGER|1|0',
+      'gear_speed|INTEGER|1|0',
+      'gear_luck|INTEGER|1|0',
+      'gear_physique|INTEGER|1|0',
+      // 0032 装备战力加成（基点），NOT NULL DEFAULT 0。
+      'gear_power_bp|INTEGER|1|0',
     ]);
   });
 

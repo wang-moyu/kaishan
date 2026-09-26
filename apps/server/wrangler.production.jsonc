@@ -14,7 +14,9 @@
     "LOGIN_RATE_LIMIT_MAX_ATTEMPTS": "5",
     "LOGIN_RATE_LIMIT_WINDOW_SECONDS": "60",
     "ALLOWED_ORIGINS": "",
-    "REALM_EXPLORE_ENABLED": "true"
+    "REALM_EXPLORE_ENABLED": "true",
+    // 讨伐每日出手上限（0 = 不限），防协议脚本全天刷。
+    "WORLD_BOSS_DAILY_ATTACK_LIMIT": "120"
   },
   "d1_databases": [
     {

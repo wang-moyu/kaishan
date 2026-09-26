@@ -530,7 +530,12 @@ describe('淬体丹：评分按当前属性重算，回执与下次 sync 一致'
     });
     expect(used.status).toBe(200);
     const usedData = dataOf(used) as Record<string, any>;
-    expect(usedData.outcome.effect).toEqual({ kind: 'bodyTempering', gain: 5, attribute: 'attack' });
+    expect(usedData.outcome.effect).toEqual({
+      kind: 'bodyTempering',
+      gain: 5,
+      attribute: 'attack',
+      gains: { attack: 5 },
+    });
 
     const receipt = (usedData.state.disciples as Record<string, any>[]).find(
       (item) => item.id === discipleId,

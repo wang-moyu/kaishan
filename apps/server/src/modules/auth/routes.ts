@@ -13,9 +13,10 @@ import {
   setCsrfCookie,
   setSessionCookie,
 } from './cookie';
-import { loginRequestSchema, registerRequestSchema } from './schema';
+import { changePasswordRequestSchema, loginRequestSchema, registerRequestSchema } from './schema';
 import {
   assertRegisterAllowed,
+  changePassword,
   loginWithPassword,
   registerAccount,
   revokeSessionById,
@@ -29,7 +30,8 @@ import { constantTimeEqual, hashToken } from './tokens';
  * - 注册：受 REGISTRATION_ENABLED 与邀请码控制，客户端无法绕过；
  * - 登录：不要求预先持有 session token；失败与限频见 service.ts；
  * - me：需要有效会话；按需轮换 CSRF 令牌（Cookie 缺失或与服务端摘要不符时）；
- * - 退出：需要会话 + CSRF + 同源 Origin（CSRF 由 middleware/csrf.ts 统一校验）。
+ * - 退出：需要会话 + CSRF + 同源 Origin（CSRF 由 middleware/csrf.ts 统一校验）；
+ * - 改密码：同退出的保护；成功后本账号其他会话全部失效，当前会话保留。
  *
  * 日志只写 userId 与事件名，绝不写密码、令牌或 CSRF 值。
  */
@@ -96,6 +98,26 @@ export function createAuthRoutes(): Hono<AppEnv> {
 
     // sect 摘要属于 P1（宗门创建）之前为 null，这里保持字段存在，避免前端分支猜测
     return respondOk(c, { user, sect: null, csrfToken });
+  });
+
+  routes.post('/auth/change-password', async (c) => {
+    const auth = authOf(c);
+    if (auth === null) {
+      throw new AppError('UNAUTHENTICATED');
+    }
+
+    const config = readAuthConfig(c.env);
+    const body = await parseStrictJson(changePasswordRequestSchema, c);
+    const { revokedSessions } = await changePassword(getDb(c.env), config, Date.now(), auth, body, {
+      ip: clientIpOf(c),
+    });
+    c.get('logger').info('auth_password_changed', {
+      requestId: c.get('requestId'),
+      userId: auth.userId,
+      revokedSessions,
+    });
+
+    return respondOk(c, { changed: true, revokedSessions });
   });
 
   routes.post('/auth/logout', async (c) => {

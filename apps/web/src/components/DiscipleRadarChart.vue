@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
+import HelpTip from './HelpTip.vue';
+
 /**
  * 弟子六轴雷达图（资质 / 攻击 / 防御 / 身法 / 幸运 / 体魄）：轻量 SVG，不引图表库。
+ *
+ * 0028 起：数值列表在基础属性后面补上装备加成 `(+n)`（加成为 0 时不显示，也不进比例尺）。
  *
  * 规则：六轴都按服务端原值 `1..100` 等比绘制（服务端保证属性 ≤ 100），不做归一化，
  * 也不把天赋（类别）、战力（含境界的派生值）画成轴。图形只是补充，旁边必须列出精确数值，
@@ -16,6 +20,13 @@ const props = defineProps<{
   speed: number;
   luck: number;
   physique: number;
+  /**
+   * 0028 装备加成：只在右侧数值列表里以 `(+n)` 标出（为 0 时不显示）。
+   * 六轴仍按基础属性绘制 —— 加成后可以超过 100，不能进比例尺。
+   */
+  gear?: { attack: number; defense: number; speed: number; luck: number; physique: number };
+  /** 每项属性的说明（给了就在名称后面加一个问号）；公开档案不传，不显示问号。 */
+  help?: Partial<Record<'aptitude' | 'attack' | 'defense' | 'speed' | 'luck' | 'physique', string>>;
 }>();
 
 /** viewBox 尺寸：留出六个轴标签的空间，宽度由 CSS 控制（响应式）。 */
@@ -64,6 +75,16 @@ function clampValue(value: number): number {
   return Math.min(100, Math.max(0, value));
 }
 
+/**
+ * 0028 该轴的装备加成（资质没有装备加成，按 0 处理）；
+ * 只用于数值列表的 `(+n)`，绝不影响图形比例尺。
+ */
+function gearBonus(key: AxisKey): number {
+  if (key === 'aptitude') return 0;
+  const value = props.gear?.[key] ?? 0;
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
+
 const values = computed<Record<AxisKey, number>>(() => ({
   aptitude: props.aptitude,
   attack: props.attack,
@@ -81,6 +102,8 @@ const axisPoints = computed(() =>
       key: axis.key,
       label: axis.label,
       value,
+      // 0028 装备加成：只用于数值列表的 `(+n)`，不参与上面的坐标计算。
+      bonus: gearBonus(axis.key),
       x: Number(point.x.toFixed(1)),
       y: Number(point.y.toFixed(1)),
       lineX: Number(pointAt(axis.angle, RADIUS).x.toFixed(1)),
@@ -94,11 +117,17 @@ const axisPoints = computed(() =>
 
 const valuePoints = computed(() => axisPoints.value.map((point) => `${point.x},${point.y}`).join(' '));
 
-/** 图旁的无障碍文本：把六条轴的值直接念出来，不让图形成为唯一信息源。 */
+/** 图旁的无障碍文本：把六条轴的值与装备加成直接念出来，不让图形成为唯一信息源。 */
 const ariaLabel = computed(
   () =>
     `${props.name} 六轴属性雷达图（资质 / 攻击 / 防御 / 身法 / 幸运 / 体魄，每轴 1~100）：` +
-    axisPoints.value.map((point) => `${point.label} ${point.value}`).join('、'),
+    axisPoints.value
+      .map((point) =>
+        point.bonus > 0
+          ? `${point.label} ${String(point.value)}（装备 +${String(point.bonus)}）`
+          : `${point.label} ${String(point.value)}`,
+      )
+      .join('、'),
 );
 </script>
 
@@ -133,11 +162,16 @@ const ariaLabel = computed(
       </g>
     </svg>
 
-    <dl class="radar-values">
+    <dl class="radar-values" :class="{ 'has-help': help !== undefined }">
       <div v-for="point in axisPoints" :key="point.key" class="radar-value-row">
-        <dt>{{ point.label }}</dt>
+        <dt>
+          {{ point.label }}
+          <HelpTip v-if="help?.[point.key]" :label="`${point.label}说明`" :text="help[point.key] ?? ''" />
+        </dt>
         <dd>
           <span class="radar-value-number">{{ point.value }}</span>
+          <!-- 0028 装备加成：`60 (+12)`；为 0 时不显示，也不进绘图比例尺。 -->
+          <span v-if="point.bonus > 0" class="gear-bonus">(+{{ point.bonus }})</span>
           <span class="radar-value-track" aria-hidden="true"><i :style="{ width: `${point.value}%` }" /></span>
         </dd>
       </div>

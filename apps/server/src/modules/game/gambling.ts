@@ -26,6 +26,17 @@ export const DEBATE_DAILY_LIMIT = 50;
 /** 每个弟子悟道值的累计分配上限。 */
 export const DAO_INSIGHT_CAP = 50;
 
+/** 悟道值溢出折算：每点折合灵石（最小单位；= 预设赌局「悟道 1 点 / 灵石 180」的同价）。 */
+export const DAO_INSIGHT_OVERFLOW_STONE = 180000;
+
+/**
+ * 该弟子还能再收多少悟道值：上限 − 已分配 − 未分配余额（不小于 0）。
+ * 余额本身也算进去：否则余额会攒到永远分配不掉。
+ */
+export function daoInsightRoom(balance: number, used: number): number {
+  return Math.max(0, DAO_INSIGHT_CAP - used - balance);
+}
+
 /**
  * 属性上限：悟道值加点后任何属性都不得超过它（= 100）。
  * 直接复用仓库已有的 names.ts 常量（与 0016 迁移的 CHECK、历练的属性夹取同一口径），

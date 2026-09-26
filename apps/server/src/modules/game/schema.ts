@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
+import { MAX_CRAFT_QUANTITY, MAX_PILL_USE_COUNT } from './alchemy';
 import { BETTABLE_ATTRIBUTES, RACE_BEAST_COUNT, RACE_BET_MAX, RACE_BET_MIN } from './gambling';
+import { BAG_CAPACITY } from './equipment';
 import { SHOP_MAX_PILL_QUANTITY, SHOP_MAX_TRADE_AMOUNT, SHOP_TRADABLE_RESOURCES } from './shop';
 
 /**
@@ -34,6 +36,32 @@ export const assignRequestSchema = z.strictObject({
   discipleId: z.string().min(1).max(64),
   /** 岗位 id 的合法性由服务端按配置校验。 */
   assignment: z.string().min(1).max(32),
+});
+
+/** 批量命令一次最多选几名弟子（宗门弟子上限 35，留出余量）。 */
+export const BATCH_DISCIPLE_LIMIT = 50;
+
+/** 批量命令的弟子列表：1~BATCH_DISCIPLE_LIMIT 个且不重复；归属由服务端逐个判定。 */
+const batchDiscipleIdsSchema = z
+  .array(z.string().min(1).max(64))
+  .min(1)
+  .max(BATCH_DISCIPLE_LIMIT)
+  .refine((ids) => new Set(ids).size === ids.length, { message: '弟子不能重复' });
+
+/** 批量转岗：按数组顺序逐个转（采灵岗位按顺序占名额）。 */
+export const assignBatchRequestSchema = z.strictObject({
+  discipleIds: batchDiscipleIdsSchema,
+  assignment: z.string().min(1).max(32),
+});
+
+/** 批量破境：不满足条件的弟子跳过；灵气须够全部可破境弟子。 */
+export const breakthroughBatchRequestSchema = z.strictObject({
+  discipleIds: batchDiscipleIdsSchema,
+});
+
+/** 批量疗伤（回春丹一人一颗）：无伤 / 重伤 / 在外的跳过；库存须够全部伤员。 */
+export const healBatchRequestSchema = z.strictObject({
+  discipleIds: batchDiscipleIdsSchema,
 });
 
 export const upgradeBuildingRequestSchema = z.strictObject({
@@ -71,16 +99,47 @@ export const challengeRequestSchema = z.strictObject({
   discipleIds: z.array(z.string().min(1)).length(3),
 });
 
-/** 丹药炼制：quantity 是 1~5 的整数；pill id 的合法性由服务端按 PILL_RECIPES 校验。 */
+/** 丹药炼制：quantity 是 1~MAX_CRAFT_QUANTITY 的整数；pill id 的合法性由服务端按 PILL_RECIPES 校验。 */
 export const craftPillRequestSchema = z.strictObject({
   pillId: z.string().min(1).max(64),
-  quantity: z.number().int().min(1).max(5),
+  quantity: z.number().int().min(1).max(MAX_CRAFT_QUANTITY),
 });
 
-/** 丹药服用：目标弟子必须属于当前宗门（服务端用 draft.discipleById 判定归属）。 */
+/**
+ * 丹药服用：目标弟子必须属于当前宗门（服务端用 draft.discipleById 判定归属）。
+ * count 是想服几颗（默认 1）；服务端按「服到满所需」与库存截断，实际颗数见 outcome.count。
+ */
 export const usePillRequestSchema = z.strictObject({
   pillId: z.string().min(1).max(64),
   discipleId: z.string().min(1).max(64),
+  count: z.number().int().min(1).max(MAX_PILL_USE_COUNT).optional(),
+});
+
+/**
+ * 0028 装备：炼器。部位与主属性的合法性由服务端按 EQUIPMENT_SLOTS / 法器候选校验
+ * （法器必须给 speed / luck，其它部位不许给），这里只做「类型 + 长度」的第一道防线。
+ */
+export const forgeEquipmentRequestSchema = z.strictObject({
+  slot: z.string().min(1).max(16),
+  mainAttr: z.string().min(1).max(16).optional(),
+  /** 装备二期：品质（common / spirit / treasure / immortal）；不传 = 凡品。 */
+  quality: z.string().min(1).max(16).optional(),
+});
+
+/** 0028 装备：穿戴（归属与状态由 service 校验）。 */
+export const equipRequestSchema = z.strictObject({
+  equipmentId: z.string().min(1).max(64),
+  discipleId: z.string().min(1).max(64),
+});
+
+/** 0028 装备：卸下（只带装备 id）。 */
+export const unequipRequestSchema = z.strictObject({
+  equipmentId: z.string().min(1).max(64),
+});
+
+/** 0028 装备：分解。1~50 件（上限 = 背包容量），重复 id 由服务端去重。 */
+export const salvageEquipmentRequestSchema = z.strictObject({
+  equipmentIds: z.array(z.string().min(1).max(64)).min(1).max(BAG_CAPACITY),
 });
 
 /**
@@ -264,4 +323,22 @@ export const sendChatMessageRequestSchema = z.strictObject({
 export const raceBetRequestSchema = z.strictObject({
   beastIndex: z.number().int().min(0).max(RACE_BEAST_COUNT - 1),
   betAmount: z.number().int().min(RACE_BET_MIN).max(RACE_BET_MAX),
+});
+
+/**
+ * 0025 世界 Boss 讨伐出手：只做「类型 + 人数」的第一道防线（1~3 个）。
+ * 去重、时段、每日次数与弟子资格（本宗 / 不在历练与疗伤中）全部在 service 里判定。
+ */
+export const worldBossAttackRequestSchema = z.strictObject({
+  discipleIds: z.array(z.string().min(1).max(64)).min(1).max(10),
+});
+
+/**
+ * 世界 Boss 三期：功勋兑换。合法性（部位 / 主属性 / 数量组合）由 service 校验，这里只做类型与长度。
+ */
+export const worldBossExchangeRequestSchema = z.strictObject({
+  itemId: z.enum(['xuantie', 'spirit', 'treasure', 'immortal']),
+  quantity: z.number().int().min(1).max(100).optional(),
+  slot: z.string().min(1).max(16).optional(),
+  mainAttr: z.string().min(1).max(16).optional(),
 });

@@ -1,6 +1,7 @@
 import { ParamRepository, type ParameterizedQuery } from '../../infra/db/repository';
 
 import type { PillAttribute } from './alchemy';
+import { EQUIPMENT_QUALITIES } from './equipment';
 import type { BettableAttribute } from './gambling';
 
 /**
@@ -58,6 +59,18 @@ export interface DiscipleRow {
   luck: number;
   /** 体魄（1~100，0016）：只影响单人定时历练的受伤概率。 */
   physique: number;
+  /**
+   * 0028 装备加成（冗余列，见 equipment.ts）：该弟子当前穿戴装备的加成之和。
+   * **战斗计算只读这 5 列**，不在战斗时查装备表；每次穿戴 / 卸下 / 驱逐都在同一个 batch 里
+   * 按装备表重新求和写回（refreshDiscipleGearStatement），避免内存加减累积误差。
+   */
+  gear_attack: number;
+  gear_defense: number;
+  gear_speed: number;
+  gear_luck: number;
+  gear_physique: number;
+  /** 0032 装备战力加成（基点）：身上装备按品质的战力加成之和，与上面 5 列同一套写回。 */
+  gear_power_bp: number;
   talent: string;
   realm_id: string;
   stage: number;
@@ -65,6 +78,8 @@ export interface DiscipleRow {
   cultivation_remainder: number;
   assignment: string;
   injured_until: number | null;
+  /** 二期阶段一：重伤到期时间（UTC 毫秒）；null = 未重伤。 */
+  severe_injured_until: number | null;
   /** 已服用淬体丹次数（上限 BODY_TEMPERING_MAX_USES，见 alchemy.ts）。 */
   body_tempering_count: number;
   /** 0013 掌门私有备注（单行纯文本，≤60 字；只进登录玩家自己的视图）。 */
@@ -232,8 +247,9 @@ export class DiscipleRepository extends ParamRepository {
   async findBySectId(sectId: string): Promise<DiscipleRow[]> {
     return this.all<DiscipleRow>({
       sql: `SELECT id, sect_id, name, gender, aptitude, attack, defense, speed, luck, physique, talent,
+                   gear_attack, gear_defense, gear_speed, gear_luck, gear_physique, gear_power_bp,
                    realm_id, stage, cultivation, cultivation_remainder,
-                   assignment, injured_until, body_tempering_count, note, avatar_frame_id, dao_insight, dao_insight_used, created_at
+                   assignment, injured_until, severe_injured_until, body_tempering_count, note, avatar_frame_id, dao_insight, dao_insight_used, created_at
             FROM disciples WHERE sect_id = ? ORDER BY created_at ASC, id ASC`,
       params: [sectId],
     });
@@ -242,8 +258,9 @@ export class DiscipleRepository extends ParamRepository {
   async findById(discipleId: string): Promise<DiscipleRow | null> {
     return this.one<DiscipleRow>({
       sql: `SELECT id, sect_id, name, gender, aptitude, attack, defense, speed, luck, physique, talent,
+                   gear_attack, gear_defense, gear_speed, gear_luck, gear_physique, gear_power_bp,
                    realm_id, stage, cultivation, cultivation_remainder,
-                   assignment, injured_until, body_tempering_count, note, avatar_frame_id, dao_insight, dao_insight_used, created_at
+                   assignment, injured_until, severe_injured_until, body_tempering_count, note, avatar_frame_id, dao_insight, dao_insight_used, created_at
             FROM disciples WHERE id = ?`,
       params: [discipleId],
     });
@@ -529,8 +546,8 @@ export function insertDiscipleStatement(row: NewDisciple): ParameterizedQuery {
     sql: `INSERT INTO disciples
             (id, sect_id, name, gender, aptitude, attack, defense, speed, luck, physique, talent,
              realm_id, stage, cultivation, cultivation_remainder, assignment, injured_until,
-             body_tempering_count, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?)`,
+             severe_injured_until, body_tempering_count, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, NULL, NULL, ?, ?)`,
     params: [
       row.id,
       row.sectId,
@@ -737,6 +754,25 @@ export function resourceDeltaStatement(
   };
 }
 
+/**
+ * 加资源但不超过容量（讨伐发奖用）：新余额 = min(余额 + 数量, max(余额, 容量))。
+ * 在 SQL 里夹，不依赖读到的旧余额（发奖与该宗门自己的结算可能交错）；
+ * 余额本来就高于容量（探索奖励允许顶过上限）时保持不变，不会被往下压。
+ */
+export function resourceCreditCappedStatement(
+  sectId: string,
+  resourceId: string,
+  amount: number,
+  capacity: number,
+  now: number,
+): ParameterizedQuery {
+  return {
+    sql: `UPDATE resource_balances SET balance = MIN(balance + ?, MAX(balance, ?)), updated_at = ?
+          WHERE sect_id = ? AND resource_id = ?`,
+    params: [amount, capacity, now, sectId, resourceId],
+  };
+}
+
 export function updateDiscipleAssignmentStatement(discipleId: string, assignment: string): ParameterizedQuery {
   return {
     sql: 'UPDATE disciples SET assignment = ? WHERE id = ?',
@@ -788,6 +824,17 @@ export function updateDiscipleInjuryStatement(
   return {
     sql: 'UPDATE disciples SET injured_until = ? WHERE id = ?',
     params: [injuredUntil, discipleId],
+  };
+}
+
+/** 二期阶段一：重伤到期时间写回（世界 Boss 把弟子打成重伤时调用）。 */
+export function setDiscipleSevereInjuryStatement(
+  discipleId: string,
+  severeInjuredUntil: number | null,
+): ParameterizedQuery {
+  return {
+    sql: 'UPDATE disciples SET severe_injured_until = ? WHERE id = ?',
+    params: [severeInjuredUntil, discipleId],
   };
 }
 
@@ -1142,10 +1189,11 @@ export function alchemySnapshotGuardStatement(
     buildings: readonly BuildingRow[];
     pillId: string;
     pillQuantity: number;
-    disciple?: DiscipleRow;
+    /** 服药目标（批量疗伤时是多人）：每人的修为 / 属性 / 伤势 / 岗位都要仍与快照一致。 */
+    disciples?: readonly DiscipleRow[];
   },
 ): ParameterizedQuery {
-  const { sect, balances, buildings, pillId, pillQuantity, disciple } = snapshot;
+  const { sect, balances, buildings, pillId, pillQuantity, disciples = [] } = snapshot;
   const checks = [
     'EXISTS (SELECT 1 FROM sects WHERE id = ? AND level = ? AND last_settled_at = ?)',
     'COALESCE((SELECT quantity FROM pill_inventories WHERE sect_id = ? AND pill_id = ?), 0) = ?',
@@ -1164,7 +1212,7 @@ export function alchemySnapshotGuardStatement(
     checks.push('EXISTS (SELECT 1 FROM buildings WHERE id = ? AND sect_id = ? AND level = ?)');
     params.push(row.id, sect.id, row.level);
   }
-  if (disciple !== undefined) {
+  for (const disciple of disciples) {
     checks.push(`EXISTS (SELECT 1 FROM disciples WHERE id = ? AND sect_id = ?
       AND realm_id = ? AND stage = ? AND cultivation = ? AND cultivation_remainder = ?
       AND attack = ? AND defense = ? AND speed = ? AND body_tempering_count = ?
@@ -1218,10 +1266,17 @@ export function discipleSnapshotGuardStatement(
      * 保存私有备注按计划必须在外期间也能用，所以那条路径传 false。
      */
     rejectAwayMembers?: boolean;
+    /**
+     * 二期阶段一：是否要求每名成员在此刻都没有「重伤卧床」。
+     * 与 rejectAwayMembers 同一口径 —— 改名 / 备注 / 头像框 / 驱逐，以及晋升的资格判定
+     * （重伤弟子仍是本宗门的、境界不变）传 false，其余路径一律 true。
+     */
+    rejectSevereMembers?: boolean;
     defenseLineup?: string | null;
   },
 ): ParameterizedQuery {
-  const { sect, balances, members, now, rejectAwayMembers, defenseLineup } = snapshot;
+  const { sect, balances, members, now, rejectAwayMembers, rejectSevereMembers, defenseLineup } =
+    snapshot;
   const checks = [
     'EXISTS (SELECT 1 FROM sects WHERE id = ? AND level = ? AND last_settled_at = ?)',
   ];
@@ -1233,10 +1288,36 @@ export function discipleSnapshotGuardStatement(
     );
     params.push(row.id, sect.id, row.balance, row.remainder);
   }
+  pushMemberChecks(checks, params, sect.id, members, now, rejectAwayMembers === true, rejectSevereMembers === true);
+  if (defenseLineup !== undefined) {
+    checks.push('EXISTS (SELECT 1 FROM sects WHERE id = ? AND defense_lineup IS ?)');
+    params.push(sect.id, defenseLineup);
+  }
+
+  return {
+    sql: `INSERT INTO mutation_guards (command_id, valid)
+          SELECT ?, CASE WHEN ${checks.join(' AND ')} THEN 1 ELSE 0 END`,
+    params,
+  };
+}
+
+/**
+ * 成员校验（弟子快照守卫与成员分片守卫共用）：每名成员仍属本宗；
+ * rejectAwayMembers 时还要求此刻没有「尚未到期的历练」。
+ */
+function pushMemberChecks(
+  checks: string[],
+  params: (string | number | null)[],
+  sectId: string,
+  members: readonly { id: string }[],
+  now: number,
+  rejectAwayMembers: boolean,
+  rejectSevereMembers: boolean,
+): void {
   for (const member of members) {
     checks.push('EXISTS (SELECT 1 FROM disciples WHERE id = ? AND sect_id = ?)');
-    params.push(member.id, sect.id);
-    if (rejectAwayMembers === true) {
+    params.push(member.id, sectId);
+    if (rejectAwayMembers) {
       /**
        * 0014：目标弟子在此刻也不得仍处于「尚未到期的历练」。
        *
@@ -1250,19 +1331,49 @@ export function discipleSnapshotGuardStatement(
       );
       params.push(member.id, now);
     }
+    if (rejectSevereMembers) {
+      /**
+       * 二期阶段一：目标弟子在此刻也不得重伤卧床。
+       * 与上面那条同理，只是批内复核：与讨伐（一次出手可能把弟子打成重伤）并发时，
+       * 晚提交的一方整批回滚，不会出现「弟子刚被打成重伤，却还是被派了工 / 破了境」。
+       */
+      checks.push(
+        'NOT EXISTS (SELECT 1 FROM disciples WHERE id = ? AND sect_id = ? AND severe_injured_until IS NOT NULL AND severe_injured_until > ?)',
+      );
+      params.push(member.id, sectId, now);
+    }
   }
-  if (defenseLineup !== undefined) {
-    checks.push('EXISTS (SELECT 1 FROM sects WHERE id = ? AND defense_lineup IS ?)');
-    params.push(sect.id, defenseLineup);
-  }
+}
 
+/**
+ * 批量弟子命令的成员分片守卫：D1 单条语句最多绑定 100 个参数，每名成员占 2~4 个，
+ * 所以超出首条守卫的成员按片另起守卫行（口径与 discipleSnapshotGuardStatement 的成员部分一致）。
+ */
+export function discipleMembersGuardStatement(
+  guardId: string,
+  sectId: string,
+  members: readonly { id: string }[],
+  now: number,
+  rejectAwayMembers: boolean,
+  rejectSevereMembers: boolean,
+): ParameterizedQuery {
+  const checks: string[] = [];
+  const params: (string | number | null)[] = [guardId];
+  pushMemberChecks(
+    checks,
+    params,
+    sectId,
+    members,
+    now,
+    rejectAwayMembers,
+    rejectSevereMembers,
+  );
   return {
     sql: `INSERT INTO mutation_guards (command_id, valid)
           SELECT ?, CASE WHEN ${checks.join(' AND ')} THEN 1 ELSE 0 END`,
     params,
   };
 }
-
 export function deleteDiscipleSnapshotGuardStatement(commandId: string): ParameterizedQuery {
   return {
     sql: 'DELETE FROM mutation_guards WHERE command_id = ?',
@@ -2102,9 +2213,11 @@ export class ChatMessageRepository extends ParamRepository {
 
   async findAfterId(afterId: string, limit: number): Promise<ChatMessageRow[]> {
     return this.all<ChatMessageRow>({
+      // 外层用 created_at >= 锚点 走 idx_chat_messages_created_at 做范围扫描；
+      // 原来整条 WHERE 是 OR，SQLite 用不上索引，每次轮询都全表扫描。
       sql: `SELECT id, user_id, sect_name, content, created_at FROM chat_messages
-            WHERE created_at > (SELECT created_at FROM chat_messages WHERE id = ?)
-               OR (created_at = (SELECT created_at FROM chat_messages WHERE id = ?) AND id > ?)
+            WHERE created_at >= (SELECT created_at FROM chat_messages WHERE id = ?)
+              AND (created_at > (SELECT created_at FROM chat_messages WHERE id = ?) OR id > ?)
             ORDER BY created_at ASC, id ASC LIMIT ?`,
       params: [afterId, afterId, afterId, limit],
     });
@@ -2291,4 +2404,644 @@ export function settleRaceRoundStatement(roundId: string, winnerIndex: number, n
     sql: "UPDATE race_rounds SET status = 'settled', winner_index = ?, settled_at = ? WHERE id = ?",
     params: [winnerIndex, now, roundId],
   };
+}
+
+/* ---------- 0025/0027 世界 Boss（讨伐，二期） ---------- */
+
+export interface WorldBossRow {
+  id: string;
+  /** UTC+8 日期键 'YYYY-MM-DD'；一天可以有多个关卡（连战）。 */
+  day_key: string;
+  /** 第几关（每天从 1 开始）。 */
+  stage: number;
+  /** 五只轮换 Boss 的下标（0~4）。 */
+  boss_index: number;
+  /** 随机词缀 id（见 worldBoss.ts 的 WORLD_BOSS_AFFIXES；迁移过来的旧行是 'none'）。 */
+  affix: string;
+  /** 生成第 1 关时算好的「一轮伤害」，后续关卡复用它算血量。 */
+  round_damage: number;
+  max_hp: number;
+  hp: number;
+  /** 'active' | 'killed' | 'fled'。 */
+  status: string;
+  /** 最后一击的宗门 id；未击杀为 null。 */
+  killer_sect_id: string | null;
+  /** 是否已广播过「血量不足一半」（0/1）。 */
+  half_announced: number;
+  /** 奖励发放完成时间；NULL = 未发。 */
+  rewarded_at: number | null;
+  created_at: number;
+  ended_at: number | null;
+}
+
+export interface WorldBossHitRow {
+  id: string;
+  boss_id: string;
+  sect_id: string;
+  /** 冗余的宗门名（榜单与出手记录不用再 JOIN sects）。 */
+  sect_name: string;
+  /** 出战弟子名的 JSON 数组。 */
+  disciple_names: string;
+  /** 出战弟子 id 的 JSON 数组。 */
+  disciple_ids: string;
+  /** 本次受伤（普通）的弟子名 JSON 数组。 */
+  injured_names: string;
+  /** 本次被打成重伤的弟子名 JSON 数组。 */
+  severe_names: string;
+  /** 实际扣血。 */
+  damage: number;
+  is_crit: number;
+  is_last_hit: number;
+  created_at: number;
+}
+
+/** 本关伤害榜的一行（按宗门汇总）。 */
+export interface WorldBossSectDamageRow {
+  sect_id: string;
+  sect_name: string;
+  damage: number;
+  attempts: number;
+  /** 该宗门第一次出手的时间；并列时「先达到者」靠它排序。 */
+  first_at: number;
+  last_hit: number;
+}
+
+/** 历史最强一击（带 Boss 信息，用于展示名字）。 */
+export interface WorldBossTopHitRow extends WorldBossHitRow {
+  day_key: string;
+  stage: number;
+  boss_index: number;
+}
+
+/** 一名弟子在疲劳窗口内的出战次数。 */
+export interface DiscipleBattleCountRow {
+  disciple_id: string;
+  cnt: number;
+  /** 窗口内每次出战的时间（逗号分隔的毫秒数），给前端算「冒进冷却」。 */
+  times: string | null;
+}
+
+export class WorldBossRepository extends ParamRepository {
+  async findById(bossId: string): Promise<WorldBossRow | null> {
+    return this.one<WorldBossRow>({
+      sql: 'SELECT * FROM world_bosses WHERE id = ?',
+      params: [bossId],
+    });
+  }
+
+  /** 当天最新的一关（连战时就是当前关；已被打死的那关是上一条）。 */
+  async findLatestByDayKey(dayKey: string): Promise<WorldBossRow | null> {
+    return this.one<WorldBossRow>({
+      sql: 'SELECT * FROM world_bosses WHERE day_key = ? ORDER BY stage DESC LIMIT 1',
+      params: [dayKey],
+    });
+  }
+
+  /** 指定关卡（day_key + stage 唯一，用来防重复生成）。 */
+  async findByDayKeyAndStage(dayKey: string, stage: number): Promise<WorldBossRow | null> {
+    return this.one<WorldBossRow>({
+      sql: 'SELECT * FROM world_bosses WHERE day_key = ? AND stage = ?',
+      params: [dayKey, stage],
+    });
+  }
+
+  /** 今天已击杀的关数（面板「今日已连斩 N 只」）。 */
+  async countKilledByDayKey(dayKey: string): Promise<number> {
+    const row = await this.one<{ killed: number }>({
+      sql: "SELECT COUNT(*) AS killed FROM world_bosses WHERE day_key = ? AND status = 'killed'",
+      params: [dayKey],
+    });
+    return Number(row?.killed ?? 0);
+  }
+
+  /** 史上最高单日关数 = 历史上达成过的最高关卡（status = 'killed'）。 */
+  async maxKilledStage(): Promise<number> {
+    const row = await this.one<{ max_stage: number | null }>({
+      sql: "SELECT MAX(stage) AS max_stage FROM world_bosses WHERE status = 'killed'",
+      params: [],
+    });
+    return Number(row?.max_stage ?? 0);
+  }
+
+  /** 仍是 active 的 Boss（正常最多一条；Cron 漏跑时会留下隔夜的残留）。 */
+  async findActiveBosses(): Promise<WorldBossRow[]> {
+    return this.all<WorldBossRow>({
+      sql: "SELECT * FROM world_bosses WHERE status = 'active' ORDER BY day_key ASC, stage ASC",
+      params: [],
+    });
+  }
+
+  /** 已结束但还没发奖的 Boss（Cron 发奖用）。 */
+  async findUnrewardedEnded(): Promise<WorldBossRow[]> {
+    return this.all<WorldBossRow>({
+      sql: "SELECT * FROM world_bosses WHERE status IN ('killed', 'fled') AND rewarded_at IS NULL ORDER BY day_key ASC, stage ASC",
+      params: [],
+    });
+  }
+
+  /**
+   * 「合格宗门」的第一优先口径：最近 N 天在 world_boss_hits 里出过手的宗门。
+   * 两边都走索引（world_bosses 的 (day_key, stage) 唯一索引 + hits 的 (boss_id, created_at)）。
+   */
+  async sectsWithHitsSince(sinceDayKey: string): Promise<string[]> {
+    const rows = await this.all<{ sect_id: string }>({
+      sql: `SELECT DISTINCT h.sect_id AS sect_id
+              FROM world_boss_hits h
+              JOIN world_bosses b ON b.id = h.boss_id
+             WHERE b.day_key >= ?`,
+      params: [sinceDayKey],
+    });
+    return rows.map((row) => row.sect_id);
+  }
+
+  /** 合格宗门的兜底口径：last_settled_at 在阈值之后（活跃）的宗门。 */
+  async activeSectsSince(thresholdMs: number): Promise<{ id: string; name: string; level: number }[]> {
+    return this.all<{ id: string; name: string; level: number }>({
+      sql: 'SELECT id, name, level FROM sects WHERE last_settled_at >= ? ORDER BY id',
+      params: [thresholdMs],
+    });
+  }
+
+  /** 参与宗门的等级/名字（发奖按各自产出计算时用）。 */
+  async sectsByIds(sectIds: readonly string[]): Promise<{ id: string; name: string; level: number }[]> {
+    if (sectIds.length === 0) return [];
+    const placeholders = sectIds.map(() => '?').join(', ');
+    return this.all<{ id: string; name: string; level: number }>({
+      sql: `SELECT id, name, level FROM sects WHERE id IN (${placeholders})`,
+      params: [...sectIds],
+    });
+  }
+
+  /** 该宗门最近一条出手记录的时间（冷却判断；走 (sect_id, created_at DESC) 索引）。 */
+  async lastHitAtBySect(sectId: string): Promise<number | null> {
+    const row = await this.one<{ created_at: number | null }>({
+      sql: 'SELECT created_at FROM world_boss_hits WHERE sect_id = ? ORDER BY created_at DESC LIMIT 1',
+      params: [sectId],
+    });
+    return row?.created_at === null || row?.created_at === undefined ? null : Number(row.created_at);
+  }
+
+  /** 该宗门自 since 起的出手次数（每日出手上限用；走 (sect_id, created_at DESC) 索引）。 */
+  async countHitsBySectSince(sectId: string, since: number): Promise<number> {
+    const row = await this.one<{ total: number }>({
+      sql: 'SELECT COUNT(*) AS total FROM world_boss_hits WHERE sect_id = ? AND created_at >= ?',
+      params: [sectId, since],
+    });
+    return Number(row?.total ?? 0);
+  }
+
+  /** 某只 Boss 的全部出手记录（发奖排名用）。 */
+  async hitsByBoss(bossId: string): Promise<WorldBossHitRow[]> {
+    return this.all<WorldBossHitRow>({
+      sql: 'SELECT * FROM world_boss_hits WHERE boss_id = ? ORDER BY created_at ASC',
+      params: [bossId],
+    });
+  }
+
+  /** 出手记录（新的在前）。 */
+  async recentHitsByBoss(bossId: string, limit: number): Promise<WorldBossHitRow[]> {
+    return this.all<WorldBossHitRow>({
+      sql: 'SELECT * FROM world_boss_hits WHERE boss_id = ? ORDER BY created_at DESC LIMIT ?',
+      params: [bossId, limit],
+    });
+  }
+
+  /** 本关伤害榜：按宗门汇总，伤害高的在前，并列取先达到者。 */
+  async sectDamageRows(bossId: string): Promise<WorldBossSectDamageRow[]> {
+    return this.all<WorldBossSectDamageRow>({
+      sql: `SELECT sect_id,
+                   MAX(sect_name) AS sect_name,
+                   SUM(damage) AS damage,
+                   COUNT(*) AS attempts,
+                   MIN(created_at) AS first_at,
+                   MAX(CASE WHEN is_last_hit = 1 THEN 1 ELSE 0 END) AS last_hit
+              FROM world_boss_hits
+             WHERE boss_id = ?
+             GROUP BY sect_id
+             ORDER BY damage DESC, first_at ASC`,
+      params: [bossId],
+    });
+  }
+
+  /**
+   * 历史最强一击（全表）。
+   * 先用 damage 索引取 MAX（只读 1 行），再按等值取同伤害里最早的那次；
+   * 原来的「JOIN + ORDER BY damage DESC, created_at ASC」会全表扫描 + 排序，D1 读行数随出手次数线性增长。
+   */
+  async topHit(): Promise<WorldBossTopHitRow | null> {
+    return this.one<WorldBossTopHitRow>({
+      sql: `SELECT h.*, b.day_key, b.stage, b.boss_index
+              FROM world_boss_hits h
+              JOIN world_bosses b ON b.id = h.boss_id
+             WHERE h.damage = (SELECT MAX(damage) FROM world_boss_hits)
+             ORDER BY h.created_at ASC
+             LIMIT 1`,
+      params: [],
+    });
+  }
+
+  /** 疲劳：本宗门每名弟子在窗口内的出战次数。 */
+  async fatigueCountsBySect(sectId: string, sinceMs: number): Promise<DiscipleBattleCountRow[]> {
+    return this.all<DiscipleBattleCountRow>({
+      sql: `SELECT disciple_id, COUNT(*) AS cnt, GROUP_CONCAT(created_at) AS times
+              FROM disciple_boss_battles
+             WHERE sect_id = ? AND created_at >= ?
+             GROUP BY disciple_id`,
+      params: [sectId, sinceMs],
+    });
+  }
+
+  /** 清掉窗口之外的老行（Cron 顺带调用，防止表无限增长）。 */
+  async deleteBattlesBefore(thresholdMs: number): Promise<number> {
+    const result = await this.execute({
+      sql: 'DELETE FROM disciple_boss_battles WHERE created_at < ?',
+      params: [thresholdMs],
+    });
+    return Number(result.meta.changes);
+  }
+
+  /** 出现：UNIQUE (day_key, stage)，已有则什么都不做；返回是否真的插入了。 */
+  async insertBossIfAbsent(row: {
+    id: string;
+    dayKey: string;
+    stage: number;
+    bossIndex: number;
+    affix: string;
+    roundDamage: number;
+    maxHp: number;
+    now: number;
+  }): Promise<boolean> {
+    const result = await this.execute({
+      sql: `INSERT INTO world_bosses
+              (id, day_key, stage, boss_index, affix, round_damage, max_hp, hp, status, half_announced, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?)
+            ON CONFLICT (day_key, stage) DO NOTHING`,
+      params: [
+        row.id,
+        row.dayKey,
+        row.stage,
+        row.bossIndex,
+        row.affix,
+        row.roundDamage,
+        row.maxHp,
+        row.maxHp,
+        row.now,
+      ],
+    });
+    return Number(result.meta.changes) > 0;
+  }
+
+  /** 单条写入（出现 / 逃走 / 半血标记 / 最后一击标记 / 清理疲劳）：与 ChatMessageRepository 同一处理。 */
+  override async execute(query: ParameterizedQuery): Promise<D1Result> {
+    return super.execute(query);
+  }
+}
+
+/**
+ * 出手扣血（一次条件 UPDATE，原子性由数据库保证）：
+ * `WHERE status = 'active'` 让结束后的并发提交变成空操作；SET 里的表达式一律用**更新前**的
+ * 行值求值，所以 `hp - ?` 就是「扣血前的血量」，最后一击/结束时间都由它判定。
+ */
+export function updateWorldBossHpStatement(
+  bossId: string,
+  damage: number,
+  sectId: string,
+  now: number,
+): ParameterizedQuery {
+  return {
+    sql: `UPDATE world_bosses
+             SET hp = MAX(0, hp - ?),
+                 status = CASE WHEN hp - ? <= 0 THEN 'killed' ELSE status END,
+                 killer_sect_id = CASE WHEN hp - ? <= 0 AND killer_sect_id IS NULL THEN ? ELSE killer_sect_id END,
+                 ended_at = CASE WHEN hp - ? <= 0 THEN ? ELSE ended_at END
+           WHERE id = ? AND status = 'active'`,
+    params: [damage, damage, damage, sectId, damage, now, bossId],
+  };
+}
+
+export function insertWorldBossHitStatement(row: {
+  id: string;
+  bossId: string;
+  sectId: string;
+  sectName: string;
+  discipleNames: string;
+  discipleIds: string;
+  injuredNames: string;
+  severeNames: string;
+  damage: number;
+  isCrit: boolean;
+  now: number;
+}): ParameterizedQuery {
+  return {
+    sql: `INSERT INTO world_boss_hits
+            (id, boss_id, sect_id, sect_name, disciple_names, disciple_ids,
+             injured_names, severe_names, damage, is_crit, is_last_hit, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+    params: [
+      row.id,
+      row.bossId,
+      row.sectId,
+      row.sectName,
+      row.discipleNames,
+      row.discipleIds,
+      row.injuredNames,
+      row.severeNames,
+      row.damage,
+      row.isCrit ? 1 : 0,
+      row.now,
+    ],
+  };
+}
+
+/** 疲劳记录：每名出战弟子每次写一行。 */
+export function insertDiscipleBossBattleStatement(row: {
+  id: string;
+  discipleId: string;
+  sectId: string;
+  now: number;
+}): ParameterizedQuery {
+  return {
+    sql: 'INSERT INTO disciple_boss_battles (id, disciple_id, sect_id, created_at) VALUES (?, ?, ?, ?)',
+    params: [row.id, row.discipleId, row.sectId, row.now],
+  };
+}
+
+/** 血量首次跌破一半的广播标记（条件更新：并发下只有一个请求抢到）。 */
+export function markWorldBossHalfAnnouncedStatement(bossId: string): ParameterizedQuery {
+  return {
+    sql: 'UPDATE world_bosses SET half_announced = 1 WHERE id = ? AND half_announced = 0',
+    params: [bossId],
+  };
+}
+
+export function markWorldBossHitLastHitStatement(hitId: string): ParameterizedQuery {
+  return {
+    sql: 'UPDATE world_boss_hits SET is_last_hit = 1 WHERE id = ?',
+    params: [hitId],
+  };
+}
+
+/** 逃走（23:00 窗口结束仍未击杀）；只对仍 active 的行生效。 */
+export function markWorldBossFledStatement(bossId: string, now: number): ParameterizedQuery {
+  return {
+    sql: "UPDATE world_bosses SET status = 'fled', ended_at = ? WHERE id = ? AND status = 'active'",
+    params: [now, bossId],
+  };
+}
+
+/** 发奖完成标记：条件更新 `rewarded_at IS NULL`，与写奖语句同批提交 → 只会发一次。 */
+export function markWorldBossRewardedStatement(bossId: string, now: number): ParameterizedQuery {
+  return {
+    sql: 'UPDATE world_bosses SET rewarded_at = ? WHERE id = ? AND rewarded_at IS NULL',
+    params: [now, bossId],
+  };
+}
+
+/**
+ * 丹药库存的**增量** upsert（0025）：与 upsertPillInventoryStatement 的绝对值写回不同，
+ * 它可以在 Cron 里一次给多个宗门加同一味丹药，并且并发时不会互相覆盖。
+ */
+export function incrementPillInventoryStatement(
+  sectId: string,
+  pillId: string,
+  delta: number,
+  now: number,
+): ParameterizedQuery {
+  return {
+    sql: `INSERT INTO pill_inventories (id, sect_id, pill_id, quantity, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (sect_id, pill_id)
+          DO UPDATE SET quantity = quantity + excluded.quantity, updated_at = excluded.updated_at`,
+    params: [crypto.randomUUID(), sectId, pillId, delta, now],
+  };
+}
+
+/* ---------- 装备（0028 迁移：装备表 / 弟子 gear_ 冗余列 / 快照守卫） ---------- */
+
+/**
+ * 装备行（0028）：disciple_id 为 NULL = 在背包里，否则 = 穿在该弟子身上。
+ * 属性（主/副）生成后不再变化，所以没有「修改装备」的语句。
+ */
+export interface EquipmentRow {
+  id: string;
+  sect_id: string;
+  disciple_id: string | null;
+  /** weapon | armor | artifact（见 equipment.ts 的 EQUIPMENT_SLOTS）。 */
+  slot: string;
+  /** common | spirit | treasure | immortal（见 EQUIPMENT_QUALITIES）。 */
+  quality: string;
+  name: string;
+  main_attr: string;
+  main_value: number;
+  sub_attr: string;
+  sub_value: number;
+  /** forge | boss（一期的两个来源）。 */
+  source: string;
+  created_at: number;
+}
+
+export class EquipmentRepository extends ParamRepository {
+  /** 本宗全部装备（背包 + 已穿戴）；新的在前，背包列表与弟子页共用这份数据。 */
+  async findBySectId(sectId: string): Promise<EquipmentRow[]> {
+    return this.all<EquipmentRow>({
+      sql: `SELECT id, sect_id, disciple_id, slot, quality, name, main_attr, main_value,
+                   sub_attr, sub_value, source, created_at
+            FROM equipment WHERE sect_id = ? ORDER BY created_at DESC, id DESC`,
+      params: [sectId],
+    });
+  }
+
+  /** 某名弟子身上的装备（穿戴 / 卸下 / 驱逐 / 跨弟子转移用；走 equipment_disciple_slot_uniq）。 */
+  async findByDiscipleId(discipleId: string): Promise<EquipmentRow[]> {
+    return this.all<EquipmentRow>({
+      sql: `SELECT id, sect_id, disciple_id, slot, quality, name, main_attr, main_value,
+                   sub_attr, sub_value, source, created_at
+            FROM equipment WHERE disciple_id = ? ORDER BY slot ASC, id ASC`,
+      params: [discipleId],
+    });
+  }
+
+  /** 天骄榜「装备榜」：几名弟子身上各部位的品质（只取榜上的人，不扫全表）。 */
+  async findWornQualitiesByDiscipleIds(
+    discipleIds: readonly string[],
+  ): Promise<{ disciple_id: string; slot: string; quality: string }[]> {
+    if (discipleIds.length === 0) {
+      return [];
+    }
+    return this.all<{ disciple_id: string; slot: string; quality: string }>({
+      sql: `SELECT disciple_id, slot, quality FROM equipment
+            WHERE disciple_id IN (${discipleIds.map(() => '?').join(', ')})`,
+      params: [...discipleIds],
+    });
+  }
+
+  /** 背包件数（disciple_id IS NULL），走 equipment_sect_idx；背包上限判断用。 */
+  async countBagBySectId(sectId: string): Promise<number> {
+    const row = await this.one<{ total: number }>({
+      sql: 'SELECT COUNT(*) AS total FROM equipment WHERE sect_id = ? AND disciple_id IS NULL',
+      params: [sectId],
+    });
+    return Number(row?.total ?? 0);
+  }
+}
+
+export interface NewEquipment {
+  id: string;
+  sectId: string;
+  slot: string;
+  quality: string;
+  name: string;
+  mainAttr: string;
+  mainValue: number;
+  subAttr: string;
+  subValue: number;
+  source: string;
+  now: number;
+}
+
+/** 生成装备（炼器 / Boss 掉落）：新装备一律先落在背包里（disciple_id = NULL）。 */
+export function insertEquipmentStatement(row: NewEquipment): ParameterizedQuery {
+  return {
+    sql: `INSERT INTO equipment
+            (id, sect_id, disciple_id, slot, quality, name, main_attr, main_value,
+             sub_attr, sub_value, source, created_at)
+          VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    params: [
+      row.id,
+      row.sectId,
+      row.slot,
+      row.quality,
+      row.name,
+      row.mainAttr,
+      row.mainValue,
+      row.subAttr,
+      row.subValue,
+      row.source,
+      row.now,
+    ],
+  };
+}
+
+/** 穿戴 / 卸下 / 跨弟子转移：只改归属人（NULL = 放回背包）。 */
+export function updateEquipmentHolderStatement(
+  equipmentId: string,
+  sectId: string,
+  discipleId: string | null,
+): ParameterizedQuery {
+  return {
+    sql: 'UPDATE equipment SET disciple_id = ? WHERE id = ? AND sect_id = ?',
+    params: [discipleId, equipmentId, sectId],
+  };
+}
+
+/** 分解（只对背包里的行生效：穿在身上的删不掉）。 */
+export function deleteBagEquipmentStatement(
+  equipmentId: string,
+  sectId: string,
+): ParameterizedQuery {
+  return {
+    sql: 'DELETE FROM equipment WHERE id = ? AND sect_id = ? AND disciple_id IS NULL',
+    params: [equipmentId, sectId],
+  };
+}
+
+/**
+ * 驱逐弟子时把背包放不下的那几件直接删掉（计划 1.5）。
+ * 这里**不能**用上面的「只删背包行」：此刻它仍登记在被驱逐的弟子名下
+ * （归属人是在同一批里被删掉的行，D1 的 batch 按数组顺序执行）。
+ */
+export function deleteEquipmentStatement(equipmentId: string, sectId: string): ParameterizedQuery {
+  return {
+    sql: 'DELETE FROM equipment WHERE id = ? AND sect_id = ?',
+    params: [equipmentId, sectId],
+  };
+}
+
+/**
+ * 品质 → 战力加成（基点）的 SQL CASE 表达式：由 EQUIPMENT_QUALITIES 生成（常量，不含请求数据），
+ * 0032 迁移里手写的是同一张表。
+ */
+const GEAR_POWER_BP_CASE =
+  `CASE quality ${EQUIPMENT_QUALITIES.map((quality) => `WHEN '${quality.id}' THEN ${String(quality.powerBonusBp)}`).join(' ')} ELSE 0 END`;
+
+/**
+ * 按**装备表重新求和**写回这名弟子的 6 个冗余列（计划 2.2；0032 起多一列 gear_power_bp）。
+ *
+ * 不在内存里加减，避免多次穿戴 / 卸下把误差累积起来；必须与改动装备的语句放在同一个
+ * batch 里，且排在它们**之后** —— D1 的 batch 按数组顺序执行，SUM 才看得到新归属。
+ * 参数顺序：6 个 SET 子查询各一个 disciple_id，最后 WHERE 一个。
+ */
+export function refreshDiscipleGearStatement(discipleId: string): ParameterizedQuery {
+  const sumOf = (attr: string): string =>
+    `COALESCE((SELECT SUM(CASE WHEN main_attr = '${attr}' THEN main_value ELSE 0 END` +
+    ` + CASE WHEN sub_attr = '${attr}' THEN sub_value ELSE 0 END)` +
+    ` FROM equipment WHERE disciple_id = ?), 0)`;
+  return {
+    sql:
+      `UPDATE disciples SET gear_attack = ${sumOf('attack')}, gear_defense = ${sumOf('defense')},` +
+      ` gear_speed = ${sumOf('speed')}, gear_luck = ${sumOf('luck')}, gear_physique = ${sumOf('physique')},` +
+      ` gear_power_bp = COALESCE((SELECT SUM(${GEAR_POWER_BP_CASE}) FROM equipment WHERE disciple_id = ?), 0)` +
+      ` WHERE id = ?`,
+    params: [discipleId, discipleId, discipleId, discipleId, discipleId, discipleId, discipleId],
+  };
+}
+
+/**
+ * 装备行的快照守卫（与弟子 / 丹药守卫同一模式）：快照过期时插入 valid=0，
+ * 触发 mutation_guards 的 CHECK，让同批的装备改动 + gear 列写回一起回滚。
+ *
+ * 为什么需要它：同一件装备的两次并发操作（双击「穿戴」到两名不同弟子）读到的归属人一样，
+ * 弟子守卫看不出来；少了这条就会出现「装备表归属是 B，但 A 的 gear 列还算着这件装备」。
+ * 校验内容：这些装备行仍属本宗，且归属人仍是读快照时的那个（NULL = 仍在背包里）。
+ */
+export function equipmentGuardStatement(
+  guardId: string,
+  sectId: string,
+  items: readonly { id: string; discipleId: string | null }[],
+): ParameterizedQuery {
+  const checks: string[] = [];
+  const params: (string | number | null)[] = [guardId];
+  for (const item of items) {
+    checks.push('EXISTS (SELECT 1 FROM equipment WHERE id = ? AND sect_id = ? AND disciple_id IS ?)');
+    params.push(item.id, sectId, item.discipleId);
+  }
+  return {
+    sql: `INSERT INTO mutation_guards (command_id, valid)
+          SELECT ?, CASE WHEN ${checks.length === 0 ? '1' : checks.join(' AND ')} THEN 1 ELSE 0 END`,
+    params,
+  };
+}
+
+/**
+ * 每片装备守卫最多几件：D1 单条语句最多 100 个绑定参数，每件占 3 个（id / sect_id / 归属人），
+ * 加 guardId 本身 1 个 → 30 件 91 个参数，留出余量（与 MEMBERS_PER_GUARD 同一口径）。
+ *
+ * 为什么必须切分：分解接口一次最多 50 件（背包容量），34 件就是 103 个参数，
+ * 单条守卫会被 D1 直接拒绝（本地 miniflare 不一定拦，生产会）。
+ */
+export const EQUIPMENT_PER_GUARD = 30;
+
+/**
+ * 装备行守卫（按 EQUIPMENT_PER_GUARD 切片）；返回守卫语句与它们的 guardId，
+ * 调用方必须把每个 guardId 的清理语句也放进同一批（见 deleteDiscipleSnapshotGuardStatement）。
+ */
+export function equipmentGuardStatements(
+  commandId: string,
+  sectId: string,
+  items: readonly { id: string; discipleId: string | null }[],
+): { guards: ParameterizedQuery[]; guardIds: string[] } {
+  const guards: ParameterizedQuery[] = [];
+  const guardIds: string[] = [];
+  for (let start = 0; start < items.length; start += EQUIPMENT_PER_GUARD) {
+    const guardId = `${commandId}:equipment:${String(start)}`;
+    guardIds.push(guardId);
+    guards.push(
+      equipmentGuardStatement(
+        guardId,
+        sectId,
+        items.slice(start, start + EQUIPMENT_PER_GUARD),
+      ),
+    );
+  }
+  return { guards, guardIds };
 }

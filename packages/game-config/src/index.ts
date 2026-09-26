@@ -20,14 +20,14 @@ import type { GameConfigContent } from '@xiuxian/game-core';
  */
 
 /** 版本号：内容变化时必须同步更新版本与 payloadHash（见 03 第 12 节）。 */
-export const GAME_CONFIG_VERSION = 'v5.1.0';
+export const GAME_CONFIG_VERSION = 'v8.0.0';
 
 /**
  * 内容哈希（sha256:，覆盖规范化后的 JSON）。
  * 修改 content 后必须重新计算，否则 Worker 启动与 config:hash 校验都会失败。
  */
 export const GAME_CONFIG_PAYLOAD_HASH =
-  'sha256:7cba811dc2e4ad282590c8c98299a82cb22a1ddb46c5f6dc55068b00dee16514';
+  'sha256:7c795b90d69375f5f49b6f3d70133e1ef0cc6fd5ac811d30bb0a9cee0fccce64';
 
 export const GAME_CONFIG_CONTENT: GameConfigContent = {
   server: {
@@ -68,6 +68,26 @@ export const GAME_CONFIG_CONTENT: GameConfigContent = {
       baseRatePerHour: '0',
       visibility: 'public',
     },
+    {
+      // 装备二期：玄铁（世界 Boss / 高级秘境 / 分解获得，炼高品质装备与升级炼器坊消耗）。
+      // 没有产速；不可在坊市买卖、不可下注（坊市与赌坊都有资源白名单）。
+      id: 'xuantie',
+      name: '玄铁',
+      startAmount: '0',
+      capacity: '999000',
+      baseRatePerHour: '0',
+      visibility: 'public',
+    },
+    {
+      // 世界 Boss 三期：功勋（讨伐按伤害占比发放，用于功勋兑换）。
+      // 没有产速；不可在坊市买卖、不可下注（坊市与赌坊都有资源白名单）。
+      id: 'bossMerit',
+      name: '功勋',
+      startAmount: '0',
+      capacity: '9999000',
+      baseRatePerHour: '0',
+      visibility: 'public',
+    },
   ],
   buildings: [
     {
@@ -96,6 +116,15 @@ export const GAME_CONFIG_CONTENT: GameConfigContent = {
       name: '藏经阁',
       maxLevel: 5,
       upgradeCostPerLevel: { spiritStone: '60000', herb: '20000' },
+      visibility: 'public',
+    },
+    {
+      // 装备二期：炼器坊（宗门 2 级自动获得）。等级决定能炼的最高品质；
+      // 升级走 equipment.ts 的分档表（宗门等级门槛 + 玄铁），这里的 upgradeCostPerLevel 不参与计算。
+      id: 'forgeWorkshop',
+      name: '炼器坊',
+      maxLevel: 4,
+      upgradeCostPerLevel: { spiritStone: '2000000' },
       visibility: 'public',
     },
     {
@@ -131,6 +160,13 @@ export const GAME_CONFIG_CONTENT: GameConfigContent = {
       id: 'stoneMining',
       name: '采灵',
       outputPerHourPerDisciple: { spiritStone: '15000' },
+      visibility: 'public',
+    },
+    {
+      // v8：吐纳岗位（每小时 10000 最小单位 = 10 展示单位灵气/人），人数上限见服务端 ENERGY_GATHERING_LIMIT。
+      id: 'energyGathering',
+      name: '吐纳',
+      outputPerHourPerDisciple: { spiritualEnergy: '10000' },
       visibility: 'public',
     },
   ],

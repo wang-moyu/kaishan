@@ -13,7 +13,12 @@ import {
   UserRepository,
   type UserRow,
 } from './repository';
-import { normalizeAccount, type LoginRequest, type RegisterRequest } from './schema';
+import {
+  normalizeAccount,
+  type ChangePasswordRequest,
+  type LoginRequest,
+  type RegisterRequest,
+} from './schema';
 import type { AuthState, UserSummary } from './state';
 import { constantTimeEqual, hashToken, randomToken } from './tokens';
 
@@ -226,6 +231,50 @@ export async function loginWithPassword(
 
   const tokens = await createSession(db, config, now, user.id);
   return { user: toUserSummary(user), tokens, passwordUpgraded };
+}
+
+/**
+ * 修改密码（已登录 + CSRF）：校验旧密码 → 写新哈希并撤销本账号其他会话（同一 batch），当前会话保留。
+ *
+ * - 旧密码输错与登录共用同一个账号 / IP 失败计数：拿到会话的人不能借这里绕过登录限频猜密码；
+ * - 旧密码错误返回 VALIDATION_ERROR 而不是 401 —— 会话本身是有效的，前端不应因此登出；
+ * - 新旧密码相同直接拒绝（不跑 Argon2id 写库）。
+ */
+export async function changePassword(
+  db: D1Database,
+  config: AuthConfig,
+  now: number,
+  auth: AuthState,
+  input: ChangePasswordRequest,
+  context: LoginContext,
+): Promise<{ revokedSessions: number }> {
+  const users = new UserRepository(db);
+  const user = await users.findById(auth.userId);
+  if (user === null || user.status !== 'active') {
+    throw new AppError('UNAUTHENTICATED');
+  }
+
+  const rateLimits = new RateLimitRepository(db);
+  const accountBucket = LOGIN_ACCOUNT_BUCKET + (await hashToken(user.normalized_account));
+  const ipBucket = LOGIN_IP_BUCKET + (await hashToken(context.ip));
+  await assertLoginAllowed(rateLimits, config, now, accountBucket, ipBucket);
+
+  if (!verifyPassword(input.oldPassword, user.password_hash)) {
+    await registerLoginFailure(rateLimits, config, now, accountBucket, ipBucket);
+    throw new AppError('VALIDATION_ERROR', '当前密码不正确', { field: 'oldPassword' });
+  }
+  if (input.newPassword === input.oldPassword) {
+    throw new AppError('VALIDATION_ERROR', '新密码不能与当前密码相同', { field: 'newPassword' });
+  }
+
+  await Promise.all([rateLimits.clear(accountBucket), rateLimits.clear(ipBucket)]);
+  const revokedSessions = await users.changePasswordAndRevokeOthers(
+    user.id,
+    hashPassword(input.newPassword),
+    auth.sessionId,
+    now,
+  );
+  return { revokedSessions };
 }
 
 /** 注册限频：按来源 IP 计数（注册入口默认关闭，这里防的是开放期的批量注册）。 */

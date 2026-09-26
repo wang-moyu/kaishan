@@ -7,7 +7,9 @@ import { getDb } from '../../infra/db/client';
 import {
   abandonExplorationSchema,
   allocateDaoInsightRequestSchema,
+  assignBatchRequestSchema,
   assignRequestSchema,
+  breakthroughBatchRequestSchema,
   breakthroughRequestSchema,
   challengeRequestSchema,
   chooseRealmExploreSchema,
@@ -15,13 +17,17 @@ import {
   craftPillRequestSchema,
   createSectRequestSchema,
   daoDebateRequestSchema,
+  equipRequestSchema,
   expelDiscipleRequestSchema,
   exploreRequestSchema,
+  healBatchRequestSchema,
+  forgeEquipmentRequestSchema,
   raceBetRequestSchema,
   journeyPreviewQuerySchema,
   recruitRequestSchema,
   renameDiscipleRequestSchema,
   renameSectRequestSchema,
+  salvageEquipmentRequestSchema,
   setDefenseLineupSchema,
   setDiscipleAvatarFrameRequestSchema,
   setDiscipleNoteRequestSchema,
@@ -31,15 +37,20 @@ import {
   shopSellRequestSchema,
   startJourneyRequestSchema,
   startRealmExploreSchema,
+  unequipRequestSchema,
   upgradeBuildingRequestSchema,
   usePillRequestSchema,
   wheelSpinRequestSchema,
+  worldBossAttackRequestSchema,
+  worldBossExchangeRequestSchema,
 } from './schema';
 import {
   abandonRealmExplore,
   allocateDaoInsight,
   assignDisciple,
+  assignDisciplesBatch,
   breakthrough,
+  breakthroughBatch,
   challengeSect,
   chooseRealmExplore,
   claimJourney,
@@ -48,13 +59,23 @@ import {
   daoDebate,
   listDebateHistory,
   listDiscipleLeaderboard,
+  getDiscipleProfile,
   expelDisciple,
   exploreSectRealm,
+  equipItem,
   getActiveExploration,
+  forgeEquipment,
   getPublicSect,
+  getEquipment,
   getSectState,
+  healDisciplesBatch,
+  attackWorldBoss,
+  exchangeBossMerit,
+  getMeritShop,
   getRaceHistory,
   getRaceState,
+  getWorldBoss,
+  worldBossDailyAttackLimit,
   placeRaceBet,
   listChallengeHistory,
   listLeaderboard,
@@ -66,6 +87,7 @@ import {
   refreshRecruit,
   renameDisciple,
   renameSect,
+  salvageEquipment,
   setDefenseLineup,
   setDiscipleAvatarFrame,
   setDiscipleNote,
@@ -76,6 +98,7 @@ import {
   startRealmExplore,
   upgradeBuilding,
   upgradeSect,
+  unequipItem,
   usePill,
   listChatMessages,
   sendChatMessage,
@@ -167,6 +190,28 @@ export function createGameRoutes(): Hono<AppEnv> {
     return respondOk(c, { state });
   });
 
+  // 批量转岗（结算 → 逐个校验，不符合条件的跳过 → 一次受保护 batch）。
+  routes.post('/game/assign-batch', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(assignBatchRequestSchema, c);
+    const result = await assignDisciplesBatch(
+      getDb(c.env),
+      userId,
+      body.discipleIds,
+      body.assignment,
+      Date.now(),
+    );
+    return respondOk(c, { state: result.state, outcome: result.outcome });
+  });
+
+  // 批量破境（结算 → 逐个校验，不符合条件的跳过 → 灵气须够全部 → 逐人抽随机 → 一次受保护 batch）。
+  routes.post('/game/breakthrough-batch', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(breakthroughBatchRequestSchema, c);
+    const result = await breakthroughBatch(getDb(c.env), userId, body.discipleIds, Date.now());
+    return respondOk(c, { state: result.state, outcome: result.outcome });
+  });
+
   routes.post('/game/upgrade-building', async (c) => {
     const userId = requireUserId(c);
     const body = await parseStrictJson(upgradeBuildingRequestSchema, c);
@@ -213,6 +258,13 @@ export function createGameRoutes(): Hono<AppEnv> {
   routes.get('/game/disciple-leaderboard', async (c) => {
     const userId = requireUserId(c);
     const data = await listDiscipleLeaderboard(getDb(c.env), userId);
+    return respondOk(c, data);
+  });
+
+  // 天骄榜弟子公开档案（只读：不结算、不写库；只返回公开字段，弟子不存在 404）。
+  routes.get('/game/disciple-profile/:discipleId', async (c) => {
+    const userId = requireUserId(c);
+    const data = await getDiscipleProfile(getDb(c.env), userId, c.req.param('discipleId'), Date.now());
     return respondOk(c, data);
   });
 
@@ -266,7 +318,54 @@ export function createGameRoutes(): Hono<AppEnv> {
   routes.post('/game/use-pill', async (c) => {
     const userId = requireUserId(c);
     const body = await parseStrictJson(usePillRequestSchema, c);
-    const result = await usePill(getDb(c.env), userId, body.pillId, body.discipleId, Date.now());
+    const result = await usePill(getDb(c.env), userId, body.pillId, body.discipleId, body.count ?? 1, Date.now());
+    return respondOk(c, { state: result.state, outcome: result.outcome });
+  });
+
+  // 批量疗伤（结算 → 逐个校验，不符合条件的跳过 → 回春丹须够全部伤员 → 一次受保护 batch）。
+  routes.post('/game/heal-batch', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(healBatchRequestSchema, c);
+    const result = await healDisciplesBatch(getDb(c.env), userId, body.discipleIds, Date.now());
+    return respondOk(c, { state: result.state, outcome: result.outcome });
+  });
+
+  // 0028 装备：面板（结算 + 全部装备明细；装备明细不进 /game/sync）。
+  routes.get('/game/equipment', async (c) => {
+    const userId = requireUserId(c);
+    const result = await getEquipment(getDb(c.env), userId, Date.now());
+    return respondOk(c, { state: result.state, equipment: result.equipment });
+  });
+
+  // 0028 装备：炼器（结算 → 解锁/部位/主属性/背包/资源校验 → 扣资源 + 凡品装备进背包）。
+  routes.post('/game/forge-equipment', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(forgeEquipmentRequestSchema, c);
+    const result = await forgeEquipment(getDb(c.env), userId, body.slot, body.mainAttr, Date.now(), body.quality);
+    return respondOk(c, { state: result.state, outcome: result.outcome });
+  });
+
+  // 0028 装备：穿戴（结算 → 归属/状态校验 → 换装 + gear 列重新求和，一次受保护 batch）。
+  routes.post('/game/equip', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(equipRequestSchema, c);
+    const result = await equipItem(getDb(c.env), userId, body.equipmentId, body.discipleId, Date.now());
+    return respondOk(c, { state: result.state, outcome: result.outcome });
+  });
+
+  // 0028 装备：卸下（结算 → 归属/背包校验 → 放回背包，一次受保护 batch）。
+  routes.post('/game/unequip', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(unequipRequestSchema, c);
+    const result = await unequipItem(getDb(c.env), userId, body.equipmentId, Date.now());
+    return respondOk(c, { state: result.state, outcome: result.outcome });
+  });
+
+  // 0028 装备：分解（结算 → 只能分解背包里的 + 重复 id 去重 → 删除 + 返还矿石，一次 batch）。
+  routes.post('/game/salvage-equipment', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(salvageEquipmentRequestSchema, c);
+    const result = await salvageEquipment(getDb(c.env), userId, body.equipmentIds, Date.now());
     return respondOk(c, { state: result.state, outcome: result.outcome });
   });
 
@@ -484,6 +583,41 @@ export function createGameRoutes(): Hono<AppEnv> {
     const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
     const result = await getRaceHistory(getDb(c.env), page);
     return respondOk(c, result);
+  });
+
+  // 0025 世界 Boss（讨伐）：面板数据（今天的 Boss、今日伤害榜、出手记录、史上最强一击）。
+  routes.get('/game/world-boss', async (c) => {
+    const userId = requireUserId(c);
+    const result = await getWorldBoss(getDb(c.env), userId, Date.now(), worldBossDailyAttackLimit(c.env));
+    return respondOk(c, { state: result.state, boss: result.boss });
+  });
+
+  // 0025 世界 Boss（讨伐）：出手（1~3 名弟子；每宗每日 3 次，参与奖出手时立即发）。
+  routes.post('/game/world-boss/attack', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(worldBossAttackRequestSchema, c);
+    const result = await attackWorldBoss(
+      getDb(c.env),
+      userId,
+      body,
+      Date.now(),
+      worldBossDailyAttackLimit(c.env),
+    );
+    return respondOk(c, { state: result.state, result: result.result, boss: result.boss });
+  });
+
+  // 功勋兑换弹窗的价目（纯配置）。
+  routes.get('/game/merit-shop', (c) => {
+    requireUserId(c);
+    return respondOk(c, { shop: getMeritShop() });
+  });
+
+  // 世界 Boss 三期：功勋兑换（结算 → 价目 / 余额 / 背包校验 → 扣功勋 + 发玄铁或装备，一次受保护 batch）。
+  routes.post('/game/world-boss/exchange', async (c) => {
+    const userId = requireUserId(c);
+    const body = await parseStrictJson(worldBossExchangeRequestSchema, c);
+    const result = await exchangeBossMerit(getDb(c.env), userId, body, Date.now());
+    return respondOk(c, { state: result.state, outcome: result.outcome });
   });
 
   // 坊市：买入材料（结算 → 白名单 / 灵石余额 / 材料容量校验 → 扣灵石、加材料，一次受保护 batch）。

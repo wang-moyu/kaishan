@@ -1222,6 +1222,7 @@ ul {
 }
 
 .icon-action {
+  position: relative;
   display: flex;
   min-width: 67px;
   min-height: 47px;
@@ -1242,6 +1243,74 @@ ul {
 .icon-action svg {
   width: 19px;
   height: 19px;
+}
+
+/* 「更新」有未读条目时的小红点（用 <i> 而不是 span：窄屏会隐藏按钮里的 span 文字）。 */
+.icon-action-dot {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red-bright);
+  box-shadow: 0 0 0 2px rgba(8, 20, 17, 0.9);
+}
+
+/* 更新说明弹窗：按版本分组的条目，最新在上。 */
+.changelog-list {
+  display: flex;
+  max-height: min(60vh, 520px);
+  flex-direction: column;
+  gap: 16px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.changelog-list::-webkit-scrollbar {
+  display: none;
+}
+
+.changelog-entry {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.changelog-entry:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.changelog-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 8px;
+}
+
+.changelog-meta time {
+  color: #7f948a;
+  font-size: 12px;
+}
+
+.changelog-meta strong {
+  color: var(--gold-bright);
+  font-size: 14px;
+}
+
+.changelog-entry ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 16px;
+  list-style: disc;
+  color: #c3d1c9;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .icon-action:not(:disabled):hover {
@@ -1346,9 +1415,48 @@ ul {
 
 .resource-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* 四种资源 + 较窄的「玄铁」「背包」两格 */
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(88px, 0.5fr) minmax(96px, 0.6fr);
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
+}
+
+/* 窄格（玄铁）：只有图标 + 名称数量，没有产速列 */
+.resource-card.narrow-card {
+  grid-template-columns: 32px minmax(0, 1fr);
+}
+
+/* 背包格：外层 li 不再用资源格的三列网格，否则按钮会被挤进 32px 的图标列 */
+.resource-card.bag-card {
+  display: block;
+  padding: 0;
+}
+
+.bag-card-button {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 64px;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 11px;
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bag-card-button:hover .resource-name,
+.bag-card-button:focus-visible .resource-name {
+  color: var(--gold, #caa96a);
+}
+
+.bag-card-button strong small {
+  color: #7d9186;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .resource-card {
@@ -1766,6 +1874,160 @@ ul {
   font-weight: 700;
 }
 
+/* 匹配人数 + 「多选」开关同一行。 */
+.disciple-count-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.disciple-select-toggle {
+  min-height: 30px;
+}
+
+/* 多选模式：卡片可点选，已选卡片描金；勾选框压在卡片左上角。 */
+.disciple-row.is-selecting {
+  cursor: pointer;
+}
+
+.disciple-row.is-selected {
+  border-color: rgba(202, 169, 106, 0.62);
+  background: rgba(202, 169, 106, 0.08);
+}
+
+.disciple-select-check {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  z-index: 2;
+  display: flex;
+  padding: 2px;
+  cursor: pointer;
+}
+
+.disciple-select-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
+/* 多选底栏：吸附在名册可视区底部。 */
+.disciple-batch-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(202, 169, 106, 0.32);
+  border-radius: 4px;
+  background: rgba(8, 24, 19, 0.96);
+  box-shadow: 0 -8px 20px rgba(0, 0, 0, 0.35);
+}
+
+.disciple-batch-count {
+  color: #8fa59a;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.disciple-batch-count strong {
+  color: var(--gold-bright);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 15px;
+}
+
+.disciple-batch-bar .disciple-reset {
+  align-self: center;
+}
+
+.disciple-batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.disciple-batch-assign {
+  min-width: 132px;
+}
+
+.disciple-batch-breakthrough,
+.disciple-batch-heal {
+  min-height: 36px;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+/* 批量破境确认：可破境名单 + 将被跳过的名单。 */
+.batch-break-balance {
+  color: #8fa59a;
+  font-size: 12px;
+}
+
+.batch-break-list {
+  display: flex;
+  max-height: 220px;
+  flex-direction: column;
+  margin: 10px 0;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.batch-break-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  color: #dce6e0;
+  font-size: 13px;
+}
+
+.batch-break-list li:last-child {
+  border-bottom: 0;
+}
+
+.batch-break-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-break-cost {
+  color: #8fa59a;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.batch-break-skipped {
+  margin-bottom: 10px;
+  color: #8fa59a;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 680px) {
+  .disciple-batch-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .disciple-batch-assign {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+}
+
 .disciple-count {
   margin: 10px 0 9px;
   color: #657b70;
@@ -1794,9 +2056,13 @@ ul {
   background: rgba(6, 20, 16, 0.43);
 }
 
-/* 行左侧窄边只用于疗伤警示；可破境由满修为环表达。 */
+/* 行左侧窄边用于疗伤 / 重伤警示；可破境由满修为环表达。重伤（世界 Boss 打伤）边更实一点。 */
 .disciple-row.status-injured {
   border-left: 2px solid rgba(184, 81, 66, 0.55);
+}
+
+.disciple-row.status-severeInjured {
+  border-left: 2px solid rgba(184, 81, 66, 0.85);
 }
 
 @keyframes disciple-row-in {
@@ -1873,6 +2139,48 @@ ul {
   border-color: rgba(224, 123, 104, 0.45);
   color: var(--red-bright);
   background: rgba(184, 81, 66, 0.12);
+}
+
+/* 账号弹窗：信息卡 + 改密码表单（输入框沿用登录页的 field-control）。 */
+.account-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.account-username {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 「疗伤中」同时是回春丹入口：外观与普通标签一致，只多一个手型与悬停提亮。 */
+.disciple-status-button {
+  font: inherit;
+  font-size: 11px;
+  line-height: inherit;
+  cursor: pointer;
+}
+
+.disciple-status-button:hover:not(:disabled),
+.disciple-status-button:focus-visible {
+  border-color: rgba(224, 123, 104, 0.75);
+  background: rgba(184, 81, 66, 0.2);
+}
+
+.disciple-status-button:disabled {
+  cursor: default;
+}
+
+/* 重伤卧床：与疗伤同一红色系，但标签上带剩余静养时间。 */
+.disciple-status.is-severeInjured {
+  border-color: rgba(224, 123, 104, 0.6);
+  color: var(--red-bright);
+  background: rgba(184, 81, 66, 0.16);
 }
 
 .disciple-status.is-capped {
@@ -2312,39 +2620,6 @@ ul {
   line-height: 1.5;
 }
 
-/* 幸运 / 体魄：数值 + 实际作用成对出现，只作用于单人定时历练。 */
-.disciple-attribute-effects {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-}
-
-.disciple-attribute-effects > div {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: 82px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 8px;
-  padding: 8px 11px;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.014);
-}
-
-.disciple-attribute-effects dt {
-  color: #93a99e;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.disciple-attribute-effects dd {
-  min-width: 0;
-  margin: 0;
-  color: #7d9186;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 .disciple-break-button {
   width: 100%;
   min-height: 42px;
@@ -2369,6 +2644,7 @@ ul {
 .disciple-pill {
   display: flex;
   min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
@@ -2387,6 +2663,7 @@ ul {
 .disciple-pill-copy {
   display: flex;
   min-width: 0;
+  flex: 1 1 0;
   flex-direction: column;
   gap: 2px;
 }
@@ -2416,6 +2693,47 @@ ul {
   color: var(--jade-bright);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.disciple-pill-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 「服到满」确认：在该丹药条目下方展开，占满整行。 */
+.disciple-pill-confirm {
+  display: flex;
+  flex: 1 0 100%;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(202, 169, 106, 0.28);
+  border-radius: 8px;
+  color: #dce6e0;
+  background: rgba(202, 169, 106, 0.05);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.disciple-pill-confirm strong {
+  color: var(--gold-bright);
+}
+
+.disciple-pill-confirm-note {
+  color: var(--gold-bright);
+}
+
+.disciple-pill-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.disciple-pill-confirm-actions button {
+  padding: 6px 14px;
+  font-size: 12px;
 }
 
 .disciple-pill-button {
@@ -3019,6 +3337,17 @@ ul {
   font-size: 12px;
 }
 
+/* 自家门人详情：名称后面带问号说明，名称列加宽放下问号 */
+.radar-values.has-help .radar-value-row {
+  grid-template-columns: 50px minmax(0, 1fr);
+}
+
+.radar-values.has-help .radar-value-row dt {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .radar-value-row dd {
   display: flex;
   min-width: 0;
@@ -3031,6 +3360,12 @@ ul {
   color: #dce6e0;
   font-family: Georgia, 'Times New Roman', serif;
   font-size: 14px;
+}
+
+/* 0028 装备加成：属性显示成 `攻击 60 (+12)` 时的括号部分（加成为 0 时不渲染这个 span）。 */
+.gear-bonus {
+  color: var(--jade-bright);
+  font-size: 11px;
 }
 
 .radar-value-track {
@@ -3823,6 +4158,27 @@ ul {
 }
 
 /* 状态行固定占位：没有状态标的卡片也保留这一行，整排卡片高度才一致。 */
+.dp-luck {
+  color: #7d9186;
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.dp-more {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: #8fa79b;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dp-more:hover {
+  color: var(--gold, #caa96a);
+}
+
 .dp-status-slot {
   display: flex;
   min-height: 17px;
@@ -4369,7 +4725,7 @@ ul {
 /* ---------- Action bar (single row) ---------- */
 .action-bar {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(9, minmax(0, 1fr));
   gap: 7px;
   margin-top: 14px;
 }
@@ -5581,6 +5937,7 @@ h2.public-sect-name {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+
   .resource-card:nth-child(odd) {
     border-left: 0;
   }
@@ -5884,6 +6241,7 @@ h2.public-sect-name {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+
   .resource-card {
     min-height: 83px;
     grid-template-columns: 30px minmax(0, 1fr);
@@ -6165,7 +6523,7 @@ h2.public-sect-name {
   gap: 8px;
 }
 
-/* 数量步进（1~5）：− n + */
+/* 数量步进（1~上限）：− n + */
 .alchemy-stepper {
   display: flex;
   align-items: center;
@@ -6176,12 +6534,46 @@ h2.public-sect-name {
   padding: 2px 4px;
 }
 
-.alchemy-stepper span {
-  min-width: 26px;
-  text-align: center;
+.alchemy-quantity-input {
+  width: 34px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
   color: #dce6e0;
+  background: transparent;
+  font: inherit;
   font-size: 13px;
   font-weight: 600;
+  text-align: center;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.alchemy-quantity-input::-webkit-outer-spin-button,
+.alchemy-quantity-input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.alchemy-quantity-input:focus {
+  outline: 1px solid rgba(202, 169, 106, 0.5);
+  border-radius: 4px;
+}
+
+/* 「最大」：选到当前资源能炼的最多颗数。 */
+.alchemy-max-button {
+  padding: 3px 10px;
+  border: 1px solid rgba(202, 169, 106, 0.28);
+  border-radius: 999px;
+  color: var(--gold-bright);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.alchemy-max-button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
 }
 
 .alchemy-stepper button {
@@ -6307,12 +6699,6 @@ h2.public-sect-name {
 
   .disciple-card-meta {
     gap: 2px 6px;
-  }
-
-  /* 详情里的「幸运 / 体魄」说明在极窄屏改成上下两行，避免左侧标签列占掉一半宽度。 */
-  .disciple-attribute-effects > div {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
   }
 }
 
@@ -6544,6 +6930,125 @@ h2.public-sect-name {
 
 .disciple-break-confirm-actions .action-button {
   flex: 1 1 0;
+}
+
+/* ---------- 0028 装备（弟子详情「装备」Tab + 二级选择面板） ---------- */
+
+.gear-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gear-slot {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(119, 184, 154, 0.16);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.016);
+}
+
+.gear-slot-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 4px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gear-slot-body:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.gear-slot-body:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(202, 169, 106, 0.3);
+}
+
+.gear-slot-label {
+  color: #7d9186;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.gear-slot-name {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.gear-slot-attrs {
+  color: #9db3a8;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.gear-slot-empty {
+  color: #63756c;
+  font-size: 12px;
+}
+
+.gear-unequip {
+  align-self: flex-start;
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.gear-picker {
+  min-width: 0;
+}
+
+.gear-picker-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gear-picker-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.016);
+}
+
+.gear-picker-copy {
+  min-width: 0;
+}
+
+.gear-picker-copy strong {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.gear-picker-copy p {
+  margin: 3px 0 0;
+  color: #9db3a8;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.gear-picker-button {
+  white-space: nowrap;
 }
 
 @media (max-width: 560px) {

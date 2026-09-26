@@ -46,8 +46,15 @@ export const buildingDefSchema = z.strictObject({
 /**
  * 岗位（03 第 4 节的 assignment 枚举中 P1 有产出的几种）。
  * V5.1 第 3 节新增 `stoneMining`（采灵：每小时产灵石，人数上限由服务端按宗门等级限制）。
+ * v8 新增 `energyGathering`（吐纳：每小时产灵气，人数上限由服务端限制）。
  */
-export const positionIdSchema = z.enum(['cultivating', 'herbGathering', 'oreGathering', 'stoneMining']);
+export const positionIdSchema = z.enum([
+  'cultivating',
+  'herbGathering',
+  'oreGathering',
+  'stoneMining',
+  'energyGathering',
+]);
 
 export const positionDefSchema = z.strictObject({
   id: positionIdSchema,

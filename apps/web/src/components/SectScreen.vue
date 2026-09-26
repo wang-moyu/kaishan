@@ -9,6 +9,9 @@ import type {
   DaoDebateResult,
   ChallengeResultView,
   DiscipleView,
+  EquipmentMainAttr,
+  EquipmentSlotId,
+  EquipmentView,
   ExploreChoiceResult,
   GameActionData,
   JourneyDirection,
@@ -26,30 +29,44 @@ import type { AvatarFrameId } from '../utils/avatarFrames';
 import { ApiError } from '../api/client';
 import { formatAmount, formatBp, formatRate, formatTime } from '../utils/format';
 import {
+  equipItem,
+  fetchEquipment,
   fetchJourneyPreview,
   fetchRecruitPreview,
   fetchSecretRealms,
+  forgeEquipment,
+  salvageEquipment,
   shopBuy,
   shopSell,
   shopSellPill,
+  unequipItem,
 } from '../api/game';
+import { isInjured, severeInjuryStatusLabel } from '../utils/discipleFilter';
 import { resourceGlyph } from '../utils/glyph';
+import { CHANGELOG } from '../data/changelog';
+import AccountDialog from './AccountDialog.vue';
+import ChangelogDialog from './ChangelogDialog.vue';
 import AlchemyPanel from './AlchemyPanel.vue';
 import ChallengeDialog from './ChallengeDialog.vue';
 import ChallengeHistoryPanel from './ChallengeHistoryPanel.vue';
 import DefenseLineupPanel from './DefenseLineupPanel.vue';
 import DiscipleDetailDialog from './DiscipleDetailDialog.vue';
 import DiscipleRoster from './DiscipleRoster.vue';
+import BagDialog from './BagDialog.vue';
+import EquipmentDialog from './EquipmentDialog.vue';
 import EventLogPanel from './EventLogPanel.vue';
 import ExplorePanel from './ExplorePanel.vue';
 import ExplorePartyDialog from './ExplorePartyDialog.vue';
 import GamblingHouseDialog from './GamblingHouseDialog.vue';
+import LoadingState from './LoadingState.vue';
 import RealmExploreDialog from './RealmExploreDialog.vue';
 import ChatPanel from './ChatPanel.vue';
 import DiscipleLeaderboardPanel from './DiscipleLeaderboardPanel.vue';
 import LeaderboardPanel from './LeaderboardPanel.vue';
 import RecruitDialog from './RecruitDialog.vue';
 import ShopDialog from './ShopDialog.vue';
+import WorldBossDialog from './WorldBossDialog.vue';
+import MeritDialog from './MeritDialog.vue';
 import ModalShell from './ModalShell.vue';
 
 /**
@@ -95,8 +112,13 @@ const emit = defineEmits<{
   setDefenseLineup: [discipleIds: string[]];
   dismissChallengeResult: [];
   breakthrough: [discipleId: string];
+  /** 名册多选底栏：批量换岗 / 批量破境（请求与提示都在 App.vue）。 */
+  'batch-assign': [discipleIds: string[], assignment: string];
+  'batch-breakthrough': [discipleIds: string[]];
+  /** 名册「疗伤中」标签单个服丹走 use-pill；多选底栏的批量疗伤走这个（请求与提示都在 App.vue）。 */
+  'batch-heal': [discipleIds: string[]];
   'craft-pill': [pillId: string, quantity: number];
-  'use-pill': [pillId: string, discipleId: string];
+  'use-pill': [pillId: string, discipleId: string, count: number];
   notify: [tone: ToastTone, title: string, message: string];
   /** 详情里保存私有备注（note 为空串 = 清空）；App.vue 绑定了这个名字。 */
   'save-note': [discipleId: string, note: string];
@@ -122,7 +144,7 @@ const emit = defineEmits<{
   wheelReset: [];
 }>();
 
-/** 操作条里的弹窗开关：天机录 / 秘境探索 / 江湖榜 / 守擂阵容 / 演武录 / 炼丹 / 赌坊 / 坊市（宗门晋升与建筑仍在右栏常驻）。 */
+/** 操作条里的弹窗开关：天机录 / 秘境探索 / 讨伐 / 江湖榜 / 守擂阵容 / 演武录 / 炼丹 / 炼器 / 赌坊 / 坊市（宗门晋升与建筑仍在右栏常驻）。 */
 const openPanel = ref<
   | 'events'
   | 'explore'
@@ -131,8 +153,12 @@ const openPanel = ref<
   | 'defense-lineup'
   | 'challenge-history'
   | 'alchemy'
+  | 'equipment'
+  | 'bag'
   | 'gambling'
   | 'shop'
+  | 'world-boss'
+  | 'merit'
   | null
 >(null);
 
@@ -550,6 +576,7 @@ function buildingGlyph(defId: string): string {
   if (defId === 'missionHall') return '矿';
   if (defId === 'scriptureLibrary') return '经';
   if (defId === 'arenaHall') return '武';
+  if (defId === 'forgeWorkshop') return '器';
   return '殿';
 }
 
@@ -897,6 +924,11 @@ function onRaceNotify(tone: 'success' | 'warning', title: string, message: strin
   emit('notify', tone, title, message);
 }
 
+/** 0025 讨伐结果提示：由子组件直接 emit，SectScreen 只转发（与 onRaceNotify 同一处理）。 */
+function onWorldBossNotify(tone: 'success' | 'warning', title: string, message: string): void {
+  emit('notify', tone, title, message);
+}
+
 /**
  * 关掉赌坊弹窗：结果由 App.vue 保留，下次打开仍是干净的玩法列表。
  * 但玩家可能在对峙阶段（或天机轮转动 / 灵兽竞逐中）直接按 Esc / 点右上角 X —— 那时账其实已经结算了，
@@ -968,6 +1000,149 @@ async function onShopSellPill(pillId: string, quantity: number): Promise<void> {
     shopSubmitting.value = false;
   }
 }
+
+/* ---------- 0028 装备（炼器 / 背包 / 穿戴 / 卸下 / 分解） ---------- */
+
+/**
+ * 装备视图（GET /game/equipment 的只读结果）：打开炼器面板或弟子详情时拉一次，
+ * 每次写操作成功后再拉一次（不做定时轮询）。
+ */
+const equipment = ref<EquipmentView | null>(null);
+/** 装备写请求在途：与 props.busy 分开，只锁装备相关的按钮（避免连点重复炼器 / 分解）。 */
+const equipmentSubmitting = ref(false);
+
+/**
+ * 装备回执里的 state：与坊市同一处理 —— App.vue 上「SectScreen 自己拿到新 state」的入口只有
+ * @recruited / @recruit-refreshed（都指向同一个 onRecruitRefreshed），复用同一个入口，不新增绑定。
+ */
+function handOffEquipmentState(next: SectStateView): void {
+  emit('recruited', next);
+}
+
+/** 拉取装备视图：失败只提示，不动已有数据（面板继续显示上一次的快照，可重试）。 */
+async function loadEquipment(): Promise<void> {
+  try {
+    const data = await fetchEquipment();
+    equipment.value = data.equipment;
+  } catch (caught) {
+    emit('notify', 'error', '装备未取到', caught instanceof Error ? caught.message : '装备信息获取失败');
+  }
+}
+
+/** 打开炼器面板：先亮出上一次的快照，再拉一份最新的。 */
+function openEquipment(): void {
+  openPanel.value = 'equipment';
+  void loadEquipment();
+}
+
+/**
+ * 资源栏：四种常规资源走通用卡片；玄铁（装备二期，无产速）单独一个窄格；
+ * 功勋（三期）只在首页「功勋」弹窗里看，不上资源栏、也不占窄格。
+ */
+const mainResources = computed(() =>
+  props.state.resources.filter((resource) => resource.id !== 'xuantie' && resource.id !== 'bossMerit'),
+);
+
+/** 打开背包（资源栏最右侧的「背包」格）。 */
+function openBag(): void {
+  openPanel.value = 'bag';
+  void loadEquipment();
+}
+
+// 资源栏的「背包 x/50」需要装备视图：进页面时取一次（之后炼器 / 分解 / 穿卸 / 打开面板时刷新；不做轮询）。
+onMounted(() => {
+  void loadEquipment();
+});
+
+/** 炼器（POST /game/forge-equipment）：法器必须带主属性；成功后刷新背包与余额。 */
+async function onForgeEquipment(
+  slot: EquipmentSlotId,
+  mainAttr: EquipmentMainAttr | undefined,
+  quality?: string,
+): Promise<void> {
+  if (props.busy || equipmentSubmitting.value) return;
+  equipmentSubmitting.value = true;
+  try {
+    const { state: next, outcome } = await forgeEquipment(slot, mainAttr, quality);
+    handOffEquipmentState(next);
+    await loadEquipment();
+    if (outcome.result === 'fail') {
+      emit('notify', 'error', '炼器失败', '炉火失控，返还一半灵石与矿石，玄铁已损耗。');
+    } else if (outcome.result === 'downgrade') {
+      emit('notify', 'success', `火候偏差，炼得 ${outcome.name ?? ''}`, `${outcome.slotName} · 品质降了一档，已放入背包。`);
+    } else {
+      emit('notify', 'success', `炼得 ${outcome.name ?? ''}`, `${outcome.slotName} · 已放入背包。`);
+    }
+  } catch (caught) {
+    emit('notify', 'error', '炼器未成', caught instanceof Error ? caught.message : '炉火不济，请稍后重试。');
+  } finally {
+    equipmentSubmitting.value = false;
+  }
+}
+
+/** 分解（POST /game/salvage-equipment）：件数与返还矿石都由服务端复核，这里按回执提示。 */
+async function onSalvageEquipment(equipmentIds: string[]): Promise<void> {
+  if (props.busy || equipmentSubmitting.value || equipmentIds.length === 0) return;
+  equipmentSubmitting.value = true;
+  try {
+    const { state: next, outcome } = await salvageEquipment(equipmentIds);
+    handOffEquipmentState(next);
+    await loadEquipment();
+    emit(
+      'notify',
+      'success',
+      `分解 ${String(outcome.count)} 件装备`,
+      outcome.xuantie > 0
+        ? `返还矿石 ${formatAmount(outcome.ore)}、玄铁 ${formatAmount(outcome.xuantie)}。`
+        : `返还矿石 ${formatAmount(outcome.ore)}。`,
+    );
+  } catch (caught) {
+    emit('notify', 'error', '分解未成', caught instanceof Error ? caught.message : '无法分解，请稍后重试。');
+  } finally {
+    equipmentSubmitting.value = false;
+  }
+}
+
+/** 穿戴（弟子详情「装备」Tab 里点选背包里的同部位装备）：替换下来的那件自动回背包。 */
+async function equipToDisciple(equipmentId: string, discipleId: string): Promise<void> {
+  if (props.busy || equipmentSubmitting.value) return;
+  equipmentSubmitting.value = true;
+  try {
+    const { state: next, outcome } = await equipItem(equipmentId, discipleId);
+    handOffEquipmentState(next);
+    await loadEquipment();
+    const replaced = outcome.replacedName === null ? '' : `（${outcome.replacedName} 已换回背包）`;
+    emit('notify', 'success', `${outcome.name} 已上身`, `${outcome.discipleName ?? '弟子'}·${outcome.slotName}${replaced}`);
+  } catch (caught) {
+    emit('notify', 'error', '穿戴未成', caught instanceof Error ? caught.message : '无法穿戴，请稍后重试。');
+  } finally {
+    equipmentSubmitting.value = false;
+  }
+}
+
+/** 卸下（POST /game/unequip）：装备回背包；背包满时服务端会拒绝并给出原因。 */
+async function unequipFromDisciple(equipmentId: string): Promise<void> {
+  if (props.busy || equipmentSubmitting.value) return;
+  equipmentSubmitting.value = true;
+  try {
+    const { state: next, outcome } = await unequipItem(equipmentId);
+    handOffEquipmentState(next);
+    await loadEquipment();
+    emit('notify', 'success', `已卸下 ${outcome.name}`, '装备已放回背包。');
+  } catch (caught) {
+    emit('notify', 'error', '卸下未成', caught instanceof Error ? caught.message : '无法卸下，请稍后重试。');
+  } finally {
+    equipmentSubmitting.value = false;
+  }
+}
+
+function onDetailEquip(equipmentId: string, discipleId: string): void {
+  void equipToDisciple(equipmentId, discipleId);
+}
+
+function onDetailUnequip(equipmentId: string): void {
+  void unequipFromDisciple(equipmentId);
+}
 function onDetailAllocateDaoInsight(
   discipleId: string,
   attribute: DaoAttribute,
@@ -994,9 +1169,9 @@ function onCraftPill(pillId: string, quantity: number): void {
  * 弟子详情里点「服用」：目标弟子与服务端状态由服务端校验，转发给上层调接口。
  * （原文的全局「弟子用药」区块已迁入详情，炼丹面板只负责炼制。）
  */
-function onUsePill(pillId: string, discipleId: string): void {
+function onUsePill(pillId: string, discipleId: string, count: number): void {
   if (props.busy) return;
-  emit('use-pill', pillId, discipleId);
+  emit('use-pill', pillId, discipleId, count);
 }
 
 /* ---------- 弟子详情：只存 discipleId，每次渲染都从最新 state.disciples 取对象 ---------- */
@@ -1032,8 +1207,10 @@ watch(detailDisciple, (disciple) => {
   if (detailId.value !== null && disciple === null) detailId.value = null;
 });
 
+/** 打开详情时顺带拉一份最新的装备视图（「装备」Tab 与穿戴入口都读它；失败不影响其他 Tab）。 */
 function openDetail(discipleId: string): void {
   detailId.value = discipleId;
+  void loadEquipment();
 }
 
 function closeDetail(): void {
@@ -1116,6 +1293,204 @@ watch(breakthroughTarget, (disciple) => {
 const breakthroughEnergyName = computed(
   () => props.state.resources.find((resource) => resource.id === 'spiritualEnergy')?.name ?? '灵气',
 );
+
+/* ---------- 名册多选：批量换岗 / 批量破境 ---------- */
+
+function onBatchAssign(discipleIds: string[], assignment: string): void {
+  if (props.busy || discipleIds.length === 0) return;
+  emit('batch-assign', discipleIds, assignment);
+}
+
+/** 批量破境确认弹窗对应的已选弟子（null = 未打开）。 */
+const batchBreakthroughIds = ref<string[] | null>(null);
+/** 本弹窗已提交过：等这次请求结束（busy 回落）就关弹窗，结果由 App.vue 的提示展示。 */
+let batchBreakthroughSubmitted = false;
+
+const batchBreakthroughSelected = computed<DiscipleView[]>(() => {
+  const ids = batchBreakthroughIds.value;
+  if (ids === null) return [];
+  const byId = new Map(props.state.disciples.map((disciple) => [disciple.id, disciple]));
+  return ids.flatMap((id) => {
+    const disciple = byId.get(id);
+    return disciple === undefined ? [] : [disciple];
+  });
+});
+
+/** 可破境（除灵气外条件都满足，服务端字段）的弟子；灵气在下面整批合计。 */
+const batchBreakthroughReady = computed(() =>
+  batchBreakthroughSelected.value.filter((disciple) => disciple.breakthroughReadyExceptEnergy),
+);
+const batchBreakthroughSkipped = computed(() =>
+  batchBreakthroughSelected.value.filter((disciple) => !disciple.breakthroughReadyExceptEnergy),
+);
+const batchBreakthroughCost = computed(() =>
+  batchBreakthroughReady.value.reduce((sum, disciple) => sum + Number(disciple.breakthroughCost), 0),
+);
+const batchBreakthroughEnergy = computed(() => liveResources.value['spiritualEnergy'] ?? 0);
+const batchBreakthroughAffordable = computed(
+  () => batchBreakthroughEnergy.value >= batchBreakthroughCost.value,
+);
+/** 同一宗门的破境胜算只由聚灵阵决定，人人相同；取第一名可破境弟子的服务端字段。 */
+const batchBreakthroughChanceBp = computed(
+  () => batchBreakthroughReady.value[0]?.breakthroughChanceBp ?? 0,
+);
+
+function openBatchBreakthrough(discipleIds: string[]): void {
+  if (props.busy || discipleIds.length === 0) return;
+  batchBreakthroughSubmitted = false;
+  batchBreakthroughIds.value = discipleIds;
+}
+
+function closeBatchBreakthrough(): void {
+  batchBreakthroughIds.value = null;
+}
+
+function confirmBatchBreakthrough(): void {
+  const ids = batchBreakthroughIds.value;
+  if (props.busy || ids === null) return;
+  if (batchBreakthroughReady.value.length === 0 || !batchBreakthroughAffordable.value) return;
+  batchBreakthroughSubmitted = true;
+  // 整份已选名单交给服务端：不符合条件的由服务端跳过并在结果里列出原因。
+  emit('batch-breakthrough', ids);
+}
+
+watch(
+  () => props.busy,
+  (busy) => {
+    if (!busy && batchBreakthroughSubmitted) {
+      batchBreakthroughSubmitted = false;
+      closeBatchBreakthrough();
+    }
+  },
+);
+
+/* ---------- 回春丹：名册「疗伤中」一点即服 / 多选批量疗伤 ---------- */
+
+const HEALING_PILL_ID = 'healingPill';
+
+const healingPillRecipe = computed(() =>
+  props.state.alchemy.recipes.find((recipe) => recipe.id === HEALING_PILL_ID),
+);
+const healingPillName = computed(() => healingPillRecipe.value?.name ?? '回春丹');
+const healingPillOwned = computed(() => healingPillRecipe.value?.owned ?? 0);
+
+/** 炼丹未开启时的原因；已开启返回 null。 */
+function alchemyLockedReason(): string | null {
+  return props.state.alchemy.unlocked ? null : (props.state.alchemy.blockedReason ?? '炼丹尚未开启');
+}
+
+/** 名册里点「疗伤中」：不弹确认，直接服一颗；用不了（未开启 / 没库存）就只提示原因。最终裁决仍在服务端。 */
+function onQuickHeal(discipleId: string): void {
+  if (props.busy) return;
+  let reason = alchemyLockedReason();
+  if (reason === null && healingPillOwned.value < 1) {
+    reason = `${healingPillName.value}库存不足，请先在炼丹房炼制。`;
+  }
+  if (reason !== null) {
+    emit('notify', 'warning', `暂不可服用${healingPillName.value}`, reason);
+    return;
+  }
+  emit('use-pill', HEALING_PILL_ID, discipleId, 1);
+}
+
+/** 批量疗伤确认弹窗对应的已选弟子（null = 未打开）。 */
+const batchHealIds = ref<string[] | null>(null);
+/** 本弹窗已提交过：等这次请求结束（busy 回落）就关弹窗，结果由 App.vue 的提示展示。 */
+let batchHealSubmitted = false;
+
+/** 不能用回春丹治的原因（与服务端同一口径：重伤 > 在外 > 无伤）；能治返回 null。 */
+function healSkipReason(disciple: DiscipleView): string | null {
+  if (severeInjuryStatusLabel(disciple, serverNowMs.value) !== null) return '重伤卧床，丹药无效';
+  if (disciple.journey.status === 'active') return '外出历练中';
+  if (!isInjured(disciple, serverNowMs.value)) return '没有伤势';
+  return null;
+}
+
+interface BatchHealSkipped {
+  disciple: DiscipleView;
+  reason: string;
+}
+
+const batchHealRows = computed(() => {
+  const healable: DiscipleView[] = [];
+  const skipped: BatchHealSkipped[] = [];
+  const byId = new Map(props.state.disciples.map((disciple) => [disciple.id, disciple]));
+  for (const id of batchHealIds.value ?? []) {
+    const disciple = byId.get(id);
+    if (disciple === undefined) continue;
+    const reason = healSkipReason(disciple);
+    if (reason === null) healable.push(disciple);
+    else skipped.push({ disciple, reason });
+  }
+  return { healable, skipped };
+});
+const batchHealAffordable = computed(
+  () => healingPillOwned.value >= batchHealRows.value.healable.length,
+);
+
+function openBatchHeal(discipleIds: string[]): void {
+  if (props.busy || discipleIds.length === 0) return;
+  const reason = alchemyLockedReason();
+  if (reason !== null) {
+    emit('notify', 'warning', `暂不可服用${healingPillName.value}`, reason);
+    return;
+  }
+  batchHealSubmitted = false;
+  batchHealIds.value = discipleIds;
+}
+
+function closeBatchHeal(): void {
+  batchHealIds.value = null;
+}
+
+function confirmBatchHeal(): void {
+  const ids = batchHealIds.value;
+  if (props.busy || ids === null) return;
+  if (batchHealRows.value.healable.length === 0 || !batchHealAffordable.value) return;
+  batchHealSubmitted = true;
+  // 整份已选名单交给服务端：不需要 / 不能治的由服务端跳过并在结果里列出原因。
+  emit('batch-heal', ids);
+}
+
+watch(
+  () => props.busy,
+  (busy) => {
+    if (!busy && batchHealSubmitted) {
+      batchHealSubmitted = false;
+      closeBatchHeal();
+    }
+  },
+);
+
+/* ---------- 账号：查看账号信息 / 修改密码（弹窗自己调 auth 接口） ---------- */
+
+const showAccountDialog = ref(false);
+
+/* ---------- 更新说明：有没看过的新条目时「更新」按钮亮红点，打开即记为已读 ---------- */
+
+const CHANGELOG_SEEN_KEY = 'changelog-seen';
+const latestChangelogId = CHANGELOG[0]?.id ?? '';
+
+function readSeenChangelog(): string {
+  try {
+    return localStorage.getItem(CHANGELOG_SEEN_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+const showChangelog = ref(false);
+const changelogUnread = ref(latestChangelogId !== '' && readSeenChangelog() !== latestChangelogId);
+
+function openChangelog(): void {
+  showChangelog.value = true;
+  changelogUnread.value = false;
+  try {
+    localStorage.setItem(CHANGELOG_SEEN_KEY, latestChangelogId);
+  } catch {
+    /* 存不下只是下次还会亮红点 */
+  }
+}
 
 /** 头像点击：只开确认弹窗，不发请求（胜算、消耗与阻止原因都用服务端字段）。 */
 function onRequestBreakthrough(discipleId: string): void {
@@ -1204,6 +1579,24 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
           </svg>
           <span>同步</span>
         </button>
+        <button
+          class="icon-action"
+          type="button"
+          :aria-label="changelogUnread ? '更新说明（有新内容）' : '更新说明'"
+          @click="openChangelog"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 3h9l3 3v15H6V3Zm3 6h6m-6 4h6m-6 4h4" />
+          </svg>
+          <span>更新</span>
+          <i v-if="changelogUnread" class="icon-action-dot" aria-hidden="true" />
+        </button>
+        <button class="icon-action" type="button" aria-label="账号与密码" @click="showAccountDialog = true">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0" />
+          </svg>
+          <span>账号</span>
+        </button>
         <button class="icon-action" type="button" :disabled="busy" aria-label="退出登录" @click="emit('logout')">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M10 5H5v14h5m5-4 4-3-4-3m4 3H9" />
@@ -1226,7 +1619,7 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
 
         <ul class="resource-grid">
           <li
-            v-for="resource in state.resources"
+            v-for="resource in mainResources"
             :key="resource.id"
             class="resource-card"
             :class="[
@@ -1250,6 +1643,22 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
             <div class="resource-track" aria-hidden="true">
               <span :style="{ width: `${resourcePercent(resource.id, resource.capacity)}%` }" />
             </div>
+          </li>
+          <li class="resource-card narrow-card">
+            <div class="resource-glyph" aria-hidden="true">铁</div>
+            <div class="resource-main">
+              <span class="resource-name">玄铁</span>
+              <strong>{{ formatAmount(liveResources.xuantie ?? 0) }}</strong>
+            </div>
+          </li>
+          <li class="resource-card bag-card">
+            <button class="bag-card-button" type="button" aria-label="打开背包" @click="openBag">
+              <div class="resource-glyph" aria-hidden="true">囊</div>
+              <div class="resource-main">
+                <span class="resource-name">背包</span>
+                <strong>{{ equipment ? equipment.bagCount : '—' }}<small> / {{ equipment ? equipment.bagCapacity : 50 }}</small></strong>
+              </div>
+            </button>
           </li>
         </ul>
       </section>
@@ -1313,6 +1722,12 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
         </svg>
         <span>炼丹</span>
       </button>
+      <button class="action-chip" type="button" @click="openEquipment">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 4h9l7 7-6 6-7-7V4Zm3 3h.01M15 18l2.5 2.5M18 15l2.5 2.5" />
+        </svg>
+        <span>炼器</span>
+      </button>
       <button class="action-chip" type="button" @click="openPanel = 'defense-lineup'">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 3.2 5 6.3v5.2c0 4.1 2.9 7.8 7 9.3 4.1-1.5 7-5.2 7-9.3V6.3L12 3.2Zm-3 8.6h6" />
@@ -1324,6 +1739,25 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
           <path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm3.4 5.6-2.1 5-5 2.1 2.1-5 5-2.1Z" />
         </svg>
         <span>秘境探索</span>
+      </button>
+      <button
+        class="action-chip"
+        type="button"
+        aria-label="讨伐：全服共讨妖王"
+        title="每日 08:00 妖王降临，全服共讨"
+        @click="openPanel = 'world-boss'"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M14.5 3.2 20.8 9.5 9.6 20.7 3.3 21l.3-6.3L14.5 3.2Zm-8.6 12.5 3.4 3.4M16.2 6.9l1 1" />
+        </svg>
+        <span>讨伐</span>
+        <span v-if="state.worldBoss?.attackable" class="chip-badge">!</span>
+      </button>
+      <button class="action-chip" type="button" aria-label="功勋兑换" @click="openPanel = 'merit'">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M8 3h8l-1.5 5h-5L8 3Zm4 5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm0 3.2 1.1 2.2 2.4.35-1.75 1.7.4 2.4L12 16.7l-2.15 1.15.4-2.4-1.75-1.7 2.4-.35L12 11.2Z" />
+        </svg>
+        <span>功勋</span>
       </button>
       <button class="action-chip" type="button" @click="openPanel = 'gambling'">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1356,6 +1790,10 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
           :breakthrough-confirm-id="breakthroughConfirmId"
           @open-detail="openDetail"
           @request-breakthrough="onRequestBreakthrough"
+          @request-batch-breakthrough="openBatchBreakthrough"
+          @batch-assign="onBatchAssign"
+          @quick-heal="onQuickHeal"
+          @request-batch-heal="openBatchHeal"
         />
       </section>
 
@@ -1482,6 +1920,44 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
       />
     </ModalShell>
 
+    <!--
+      炼器 / 背包：装备视图只在打开时拉一次（GET /game/equipment，不做定时轮询），
+      炼器与分解由本组件调接口，回执里的 state 交给 App 统一赋值（见 handOffEquipmentState）。
+    -->
+    <ModalShell
+      v-if="openPanel === 'equipment'"
+      label="炼器"
+      :loading="equipmentSubmitting"
+      loading-text="正在开炉炼器"
+      @close="openPanel = null"
+    >
+      <EquipmentDialog
+        v-if="equipment"
+        :state="state"
+        :equipment="equipment"
+        :busy="busy || equipmentSubmitting"
+        @forge="onForgeEquipment"
+      />
+      <LoadingState v-else label="正在清点宗门装备" />
+    </ModalShell>
+
+    <ModalShell
+      v-if="openPanel === 'bag'"
+      label="背包"
+      :loading="equipmentSubmitting"
+      loading-text="正在分解装备"
+      @close="openPanel = null"
+    >
+      <BagDialog
+        v-if="equipment"
+        :state="state"
+        :equipment="equipment"
+        :busy="busy || equipmentSubmitting"
+        @salvage="onSalvageEquipment"
+      />
+      <LoadingState v-else label="正在清点宗门装备" />
+    </ModalShell>
+
     <!-- 选人出征：叠在秘境列表之上，Esc / 点遮罩只关这一层。 -->
     <ModalShell
       v-if="exploreRealm"
@@ -1570,6 +2046,31 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
         @reveal="onGamblingRevealed"
       />
     </ModalShell>
+  <!-- 功勋兑换：价目打开时拉一次；兑换回执里的 state 交给 App，兑到装备顺手刷新背包件数。 -->
+  <ModalShell v-if="openPanel === 'merit'" :loading="busy" label="功勋" @close="openPanel = null">
+    <MeritDialog
+      :state="state"
+      :busy="busy"
+      @state-update="(s: SectStateView) => emit('recruited', s)"
+      @notify="onWorldBossNotify"
+      @equipment-changed="loadEquipment"
+    />
+  </ModalShell>
+
+  <!-- 0025 世界 Boss（讨伐）：只在打开时 / 出手后 / 点刷新时请求，不做定时轮询。 -->
+  <ModalShell
+    v-if="openPanel === 'world-boss'"
+    :loading="busy"
+    label="讨伐"
+    @close="openPanel = null"
+  >
+    <WorldBossDialog
+      :state="state"
+      :busy="busy"
+      @state-update="(s: SectStateView) => emit('recruited', s)"
+      @notify="onWorldBossNotify"
+    />
+  </ModalShell>
 
     <!--
       坊市：三笔交易都在 ShopDialog 里当场算预览，接口调用与 toast 在本组件；
@@ -1642,7 +2143,7 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
     <ModalShell
       v-if="detailDisciple"
       fixed-height
-      :loading="busy"
+      :loading="busy || equipmentSubmitting"
       loading-text="正在处理弟子事务"
       :label="`弟子详情 · ${detailDisciple.name}`"
       @close="closeDetail"
@@ -1651,12 +2152,13 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
         :key="detailDisciple.id"
         :state="state"
         :disciple="detailDisciple"
-        :busy="busy"
+        :busy="busy || equipmentSubmitting"
         :live-cultivation="liveCultivation[detailDisciple.id] ?? null"
         :journey-preview="journeyPreview"
         :journey-preview-loading="journeyPreviewLoading"
         :journey-recent="state.journey.recent"
         :local-now-ms="localNowMs"
+        :equipment="equipment"
         @assign="onDetailAssign"
         @breakthrough="onDetailBreakthrough"
         @use-pill="onUsePill"
@@ -1669,6 +2171,8 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
         @set-avatar-frame="onDetailSetAvatarFrame"
         @allocate-dao-insight="onDetailAllocateDaoInsight"
         @rename-disciple="onDetailRenameDisciple"
+        @equip="onDetailEquip"
+        @unequip="onDetailUnequip"
       />
     </ModalShell>
 
@@ -1730,6 +2234,154 @@ function onDetailRenameDisciple(discipleId: string, name: string): void {
         </div>
       </section>
     </ModalShell>
+
+    <!-- 名册多选 · 批量破境确认：列出可破境与将被跳过的弟子、整批灵气消耗；灵气不够时不能提交。 -->
+    <ModalShell
+      v-if="batchBreakthroughIds !== null"
+      narrow
+      :loading="busy"
+      loading-text="正在逐一破境"
+      label="批量破境确认"
+      @close="closeBatchBreakthrough"
+    >
+      <section class="disciple-break-confirm" aria-labelledby="batch-break-confirm-title">
+        <header class="section-heading panel-heading compact-heading">
+          <div>
+            <p class="eyebrow">批量破境</p>
+            <h2 id="batch-break-confirm-title">{{ batchBreakthroughReady.length }} 名弟子可破境</h2>
+          </div>
+          <span class="count-badge">已选 {{ batchBreakthroughSelected.length }} 人</span>
+        </header>
+
+        <dl v-if="batchBreakthroughReady.length > 0" class="disciple-facts">
+          <div>
+            <dt>每人胜算</dt>
+            <dd>{{ formatBp(batchBreakthroughChanceBp) }}</dd>
+          </div>
+          <div>
+            <dt>{{ breakthroughEnergyName }}消耗</dt>
+            <dd>
+              {{ formatAmount(batchBreakthroughCost) }}
+              <span class="batch-break-balance">/ 现有 {{ formatAmount(batchBreakthroughEnergy) }}</span>
+            </dd>
+          </div>
+        </dl>
+
+        <ul v-if="batchBreakthroughReady.length > 0" class="batch-break-list">
+          <li v-for="disciple in batchBreakthroughReady" :key="disciple.id">
+            <span class="batch-break-name">{{ disciple.name }}</span>
+            <span class="realm-tag">{{ disciple.stageName }}</span>
+            <span class="batch-break-cost">{{ formatAmount(disciple.breakthroughCost) }} {{ breakthroughEnergyName }}</span>
+          </li>
+        </ul>
+
+        <div v-if="batchBreakthroughSkipped.length > 0" class="batch-break-skipped">
+          <p class="eyebrow">以下 {{ batchBreakthroughSkipped.length }} 人不满足条件，将被跳过</p>
+          <ul>
+            <li v-for="disciple in batchBreakthroughSkipped" :key="disciple.id">
+              {{ disciple.name }}：{{ disciple.blockedReason ?? '当前条件尚未满足' }}
+            </li>
+          </ul>
+        </div>
+
+        <p class="disciple-detail-hint">
+          失败后果：本次消耗的{{ breakthroughEnergyName }}不退，修为会跌落到本阶段的保底值，并进入调息；
+          调息结束前不能再次破境。
+        </p>
+
+        <p v-if="batchBreakthroughReady.length === 0" class="blocked-hint">所选弟子都不满足突破条件。</p>
+        <p v-else-if="!batchBreakthroughAffordable" class="blocked-hint">
+          {{ breakthroughEnergyName }}不足，请减少突破弟子数量。
+        </p>
+
+        <div class="disciple-break-confirm-actions">
+          <button class="action-button" type="button" :disabled="busy" @click="closeBatchBreakthrough">
+            取消
+          </button>
+          <button
+            class="action-button primary-action"
+            type="button"
+            :disabled="busy || batchBreakthroughReady.length === 0 || !batchBreakthroughAffordable"
+            @click="confirmBatchBreakthrough"
+          >
+            <span>{{ busy ? '破境中…' : `确认破境（${batchBreakthroughReady.length} 人）` }}</span>
+          </button>
+        </div>
+      </section>
+    </ModalShell>
+
+    <!-- 名册多选 · 批量疗伤确认：列出要治的伤员与将被跳过的弟子、回春丹消耗；库存不够时整批不能提交。 -->
+    <ModalShell
+      v-if="batchHealIds !== null"
+      narrow
+      :loading="busy"
+      loading-text="正在服用回春丹"
+      label="批量疗伤确认"
+      @close="closeBatchHeal"
+    >
+      <section class="disciple-break-confirm" aria-labelledby="batch-heal-confirm-title">
+        <header class="section-heading panel-heading compact-heading">
+          <div>
+            <p class="eyebrow">批量疗伤</p>
+            <h2 id="batch-heal-confirm-title">{{ batchHealRows.healable.length }} 名弟子待疗伤</h2>
+          </div>
+          <span class="count-badge">已选 {{ batchHealIds.length }} 人</span>
+        </header>
+
+        <dl v-if="batchHealRows.healable.length > 0" class="disciple-facts">
+          <div>
+            <dt>{{ healingPillName }}消耗</dt>
+            <dd>
+              {{ batchHealRows.healable.length }} 颗
+              <span class="batch-break-balance">/ 库存 {{ healingPillOwned }} 颗</span>
+            </dd>
+          </div>
+        </dl>
+
+        <ul v-if="batchHealRows.healable.length > 0" class="batch-break-list">
+          <li v-for="disciple in batchHealRows.healable" :key="disciple.id">
+            <span class="batch-break-name">{{ disciple.name }}</span>
+            <span class="realm-tag">{{ disciple.stageName }}</span>
+            <span class="batch-break-cost">疗伤至 {{ formatTime(disciple.injuredUntil) }}</span>
+          </li>
+        </ul>
+
+        <div v-if="batchHealRows.skipped.length > 0" class="batch-break-skipped">
+          <p class="eyebrow">以下 {{ batchHealRows.skipped.length }} 人不需要或不能服用，将被跳过</p>
+          <ul>
+            <li v-for="item in batchHealRows.skipped" :key="item.disciple.id">
+              {{ item.disciple.name }}：{{ item.reason }}
+            </li>
+          </ul>
+        </div>
+
+        <p v-if="batchHealRows.healable.length === 0" class="blocked-hint">所选弟子都不需要疗伤。</p>
+        <p v-else-if="!batchHealAffordable" class="blocked-hint">
+          {{ healingPillName }}不足：需要 {{ batchHealRows.healable.length }} 颗，库存 {{ healingPillOwned }} 颗，请减少人数或先炼制。
+        </p>
+
+        <div class="disciple-break-confirm-actions">
+          <button class="action-button" type="button" :disabled="busy" @click="closeBatchHeal">取消</button>
+          <button
+            class="action-button primary-action"
+            type="button"
+            :disabled="busy || batchHealRows.healable.length === 0 || !batchHealAffordable"
+            @click="confirmBatchHeal"
+          >
+            <span>{{ busy ? '服丹中…' : `确认疗伤（${batchHealRows.healable.length} 人）` }}</span>
+          </button>
+        </div>
+      </section>
+    </ModalShell>
+
+    <ChangelogDialog v-if="showChangelog" @close="showChangelog = false" />
+
+    <AccountDialog
+      v-if="showAccountDialog"
+      :sect-name="state.sect.name"
+      @close="showAccountDialog = false"
+      @notify="(tone, title, message) => emit('notify', tone, title, message)"
+    />
 
     <!--
       0021 宗门改名：二级弹窗（不做底栏）。价格与长度规则来自 state.rename；

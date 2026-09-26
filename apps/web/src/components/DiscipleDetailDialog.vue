@@ -6,6 +6,9 @@ import type {
   DaoAttribute,
   DiscipleJourneyView,
   DiscipleView,
+  EquipmentItemView,
+  EquipmentSlotId,
+  EquipmentView,
   JourneyDirection,
   JourneyDirectionPreviewView,
   JourneyDurationPreviewView,
@@ -16,7 +19,15 @@ import type {
 } from '../api/game';
 import type { ToastTone } from '../types/ui';
 import { formatAmount, formatBp, formatTime } from '../utils/format';
-import { NOTE_MAX_LENGTH, cultivationProgress, discipleStatus, isInjured, journeyBadge } from '../utils/discipleFilter';
+import {
+  NOTE_MAX_LENGTH,
+  cultivationProgress,
+  discipleStatus,
+  isInjured,
+  isSeverelyInjured,
+  journeyBadge,
+  severeInjuryStatusLabel,
+} from '../utils/discipleFilter';
 import {
   AVATAR_FRAME_OPTIONS,
   avatarFrameOption,
@@ -27,13 +38,14 @@ import {
 import AssignmentSelect from './AssignmentSelect.vue';
 import DiscipleAvatar from './DiscipleAvatar.vue';
 import DiscipleRadarChart from './DiscipleRadarChart.vue';
+import HelpTip from './HelpTip.vue';
 import LoadingState from './LoadingState.vue';
-import ModalShell from './ModalShell.vue';
-
 /**
- * 弟子详情（弹窗内容）：固定紧凑头部 + 四个 Tab（概览 / 修行 / 历练 / 档案）。
+ * 弟子详情（弹窗内容）：固定紧凑头部 + 五个 Tab（概览 / 修行 / 装备 / 历练 / 档案）。
  *
- * - 概览：六轴雷达图 + 当前属性与综合评分 + 简短修为摘要（雷达图必须在首 Tab）。
+ * - 概览：六轴雷达图 + 当前属性（带装备加成 `(+n)`）与综合评分 + 简短修为摘要（雷达图必须在首 Tab）。
+ * - 修行：修为、伤势、岗位、破境（胜算 / 消耗 / 原因）与丹药入口。
+ * - 装备：三个装备格（兵器 / 护甲 / 法器）；点格子从背包里挑同部位的装备穿上，已穿的可卸下。
  * - 修行：修为、伤势、岗位、破境（胜算 / 消耗 / 原因）与丹药入口。
  * - 历练：出发预览、在外倒计时、领取归队收获，以及**此弟子**的近期历练记录。
  * - 档案：头像框选取、私有备注、驱逐与二次确认。
@@ -61,12 +73,18 @@ const props = defineProps<{
   journeyRecent: JourneyRecordView[];
   /** 本地推进的服务端时钟（归队倒计时只读它，绝不读 Date.now()）。 */
   localNowMs: number;
+  /**
+   * 0028 装备视图（GET /game/equipment 的只读结果，由 SectScreen 拉取与刷新，本组件只渲染）。
+   * null = 还没取到（「装备」Tab 显示读取中），失败时保留上一次的快照。
+   */
+  equipment: EquipmentView | null;
 }>();
 
 const emit = defineEmits<{
   assign: [discipleId: string, assignment: string];
   breakthrough: [discipleId: string];
-  usePill: [pillId: string, discipleId: string];
+  /** count = 想服几颗（「服到满」传所需颗数，服务端按所需与库存截断）。 */
+  usePill: [pillId: string, discipleId: string, count: number];
   saveNote: [discipleId: string, note: string];
   /** 0017 保存头像框样式（frameId 只可能是白名单里的固定 id）。 */
   setAvatarFrame: [discipleId: string, frameId: AvatarFrameId];
@@ -79,11 +97,22 @@ const emit = defineEmits<{
   requestJourneyPreview: [discipleId: string];
   startJourney: [discipleId: string, direction: JourneyDirection, durationSeconds: number];
   claimJourney: [journeyId: string];
+  /** 0028 穿戴：把背包里的这件装备穿给本弟子（该部位原有的那件自动回背包）。 */
+  equip: [equipmentId: string, discipleId: string];
+  /** 0028 卸下：本弟子身上的这件装备回背包（背包满时服务端会拒绝）。 */
+  unequip: [equipmentId: string];
   notify: [tone: ToastTone, title: string, message: string];
 }>();
 
 const serverNowMs = computed(() => Date.parse(props.state.serverNow));
 const injured = computed(() => isInjured(props.disciple, serverNowMs.value));
+
+/** 重伤卧床中（世界 Boss 打伤，静养 1 天）：期间不产出、不修炼，写操作一律被服务端拒绝。 */
+const severeInjured = computed(() => isSeverelyInjured(props.disciple, serverNowMs.value));
+/** 重伤状态文案：`重伤 · 剩 2天5时`（按服务器时间口径倒算）；未重伤为 null。 */
+const severeLabel = computed(() => severeInjuryStatusLabel(props.disciple, serverNowMs.value));
+/** 重伤时转岗 / 破境 / 服丹 / 出发共用的原因（与服务端返回的措辞一致）。 */
+const severeHint = computed<string | null>(() => (severeInjured.value ? '重伤卧床' : null));
 
 const progress = computed(() =>
   cultivationProgress(
@@ -101,6 +130,7 @@ const energyName = computed(
 const TABS = [
   { id: 'overview', label: '概览' },
   { id: 'training', label: '修行' },
+  { id: 'gear', label: '装备' },
   { id: 'journey', label: '历练' },
   { id: 'archive', label: '档案' },
 ] as const;
@@ -123,7 +153,7 @@ function setTabButton(id: TabId, element: Element | null): void {
   else delete tabButtons.value[id];
 }
 
-/** 方向键 / Home / End 在四个 Tab 之间移动（自动激活，焦点跟着走）。 */
+/** 方向键 / Home / End 在五个 Tab 之间移动（自动激活，焦点跟着走）。 */
 function onTabKeydown(event: KeyboardEvent, current: TabId): void {
   const index = TABS.findIndex((tab) => tab.id === current);
   if (index < 0) return;
@@ -144,10 +174,13 @@ function onTabKeydown(event: KeyboardEvent, current: TabId): void {
 
 /* ---------- 头部：姓名 / 境界 / 头像框 / 状态 ---------- */
 
-/** 头部状态：在外或待领取时优先显示历练状态（含剩余时间），否则用现有状态优先级。 */
+/** 头部状态：重伤卧床优先（带剩余静养时间），其次在外 / 待领取，最后现有状态优先级。 */
 const headerStatus = computed(() => journeyBadge(props.disciple.journey, serverNowMs.value));
 const headerStatusLabel = computed(
-  () => headerStatus.value ?? discipleStatus(props.disciple, serverNowMs.value).label,
+  () =>
+    severeLabel.value ??
+    headerStatus.value ??
+    discipleStatus(props.disciple, serverNowMs.value).label,
 );
 
 /* ---------- 私有备注：单行 input，保存时 trim，空串 = 清空 ---------- */
@@ -270,7 +303,25 @@ const DAO_ATTRIBUTE_OPTIONS: readonly { value: DaoAttribute; label: string }[] =
   { value: 'physique', label: '体魄' },
 ];
 
-const daoAttribute = ref<DaoAttribute>('attack');
+/** 某项属性离 100 上限还剩多少点。 */
+function daoRoom(attribute: DaoAttribute): number {
+  return ATTRIBUTE_MAX - props.disciple[attribute];
+}
+
+/** 默认选第一个还能加点的属性（攻击已满时不能一直停在攻击上，否则整块加点区会被判成不可用）。 */
+function firstOpenAttribute(): DaoAttribute {
+  return DAO_ATTRIBUTE_OPTIONS.find((option) => daoRoom(option.value) > 0)?.value ?? 'attack';
+}
+
+const daoAttribute = ref<DaoAttribute>(firstOpenAttribute());
+
+// 换弟子 / 加点后选中的属性满了：自动切到下一个还能加的属性。
+watch(
+  () => props.disciple,
+  () => {
+    if (daoRoom(daoAttribute.value) <= 0) daoAttribute.value = firstOpenAttribute();
+  },
+);
 const daoPointsInput = ref('1');
 
 const daoAttributeValue = computed(() => props.disciple[daoAttribute.value]);
@@ -287,13 +338,22 @@ const daoPointsMax = computed(() =>
   ),
 );
 
-/** 是否还有可分配空间（可用悟道值、累计额度、属性未到 100 三者都要满足）。 */
+/** 是否还有可分配空间：有可用悟道值、累计额度未满，且**任意一项**属性未到 100（不是只看当前选中的那项）。 */
 const daoAllocatable = computed(
   () =>
     props.disciple.daoInsight > 0 &&
     props.disciple.daoInsightRemaining > 0 &&
-    ATTRIBUTE_MAX - daoAttributeValue.value > 0,
+    DAO_ATTRIBUTE_OPTIONS.some((option) => daoRoom(option.value) > 0),
 );
+
+/** 有悟道值却加不了时的原因（让玩家知道为什么没有加点按钮）。 */
+const daoBlockedReason = computed<string | null>(() => {
+  if (props.disciple.daoInsight <= 0 || daoAllocatable.value) return null;
+  if (props.disciple.daoInsightRemaining <= 0) {
+    return `该弟子已累计分配 ${String(props.disciple.daoInsightUsed)} 点，达到上限`;
+  }
+  return '该弟子六项属性均已达到 100';
+});
 
 const daoPoints = computed(() => Math.floor(Number(daoPointsInput.value)));
 const daoPointsValid = computed(
@@ -334,6 +394,9 @@ function requestBreakthrough(): void {
 /** 服务端给的历练状态与名额：本组件不复制任何门槛、奖励或概率公式。 */
 const journey = computed<DiscipleJourneyView>(() => props.disciple.journey);
 const outcome = computed<JourneyOutcomeView | null>(() => props.disciple.journey.outcome);
+
+/** 能否出发历练：服务端给的 canStart 之外，重伤卧床期间一律挡住（服务端同样会拒绝）。 */
+const journeyStartable = computed(() => journey.value.canStart && !severeInjured.value);
 
 /** 资源 id → 名字（名字只在服务端的资源表里，前端不硬编码）。 */
 const resourceNames = computed<Record<string, string>>(() =>
@@ -486,6 +549,9 @@ const awayHint = computed<string | null>(() =>
   journey.value.status === 'active' ? '在外历练期间不能转岗、破境、服药或再次出发。' : null,
 );
 
+/** 转岗 / 破境 / 服丹 / 出发被挡住的共用原因：重伤卧床优先于在外历练（同一处提示位）。 */
+const actionBlockHint = computed<string | null>(() => severeHint.value ?? awayHint.value);
+
 /** 驱逐被历练挡住时的原因：在外与待领取措辞分开，玩家才知道下一步该做什么。 */
 const expelBlockedHint = computed<string | null>(() => {
   if (journey.value.status === 'active') return '在外历练中不能驱逐，请等他归队。';
@@ -562,6 +628,17 @@ interface PillOption {
   preview: string;
   /** 不可用 / 无库存时的原因。 */
   disabledReason: string;
+  /**
+   * 「服到满」：本次实际会服几颗（= min(服到满所需, 库存)）；小于 2 时不提供这个入口
+   * （只服 1 颗与普通服用相同）。颗数与计划都来自服务端视图，前端不复制判定公式。
+   */
+  fullCount: number;
+  /** 服到满总共需要几颗（库存不够时大于 fullCount）。 */
+  fullNeeded: number;
+  /** 服到满的效果预览，例如「修为 +250（达到 300 门槛）」。 */
+  fullPreview: string;
+  /** 需要特别提醒的一句，例如「最后一颗只生效 10 点」「库存只有 2 颗」；没有则为空。 */
+  fullNote: string;
 }
 
 const pillOptions = computed<PillOption[]>(() => {
@@ -582,6 +659,9 @@ const pillOptions = computed<PillOption[]>(() => {
     let available = false;
     let preview = '';
     let reason = '';
+    let fullNeeded = 0;
+    let fullPreview = '';
+    let fullNote = '';
 
     if (pillId === 'healingPill') {
       available = injured.value;
@@ -595,6 +675,21 @@ const pillOptions = computed<PillOption[]>(() => {
         available = disciple.cultivation < required;
         preview = `修为 +${Math.min(gainPerPill, required - disciple.cultivation)}（达到 ${required} 门槛为止）`;
         reason = '修为已达门槛，无需进补';
+
+        const remaining = required - disciple.cultivation;
+        fullNeeded = disciple.cultivationPillsToFull;
+        const count = Math.min(fullNeeded, recipe.owned);
+        const total = Math.min(gainPerPill * count, remaining);
+        fullPreview =
+          count === fullNeeded
+            ? `修为 +${total}（达到 ${required} 门槛）`
+            : `修为 +${total}（${disciple.cultivation + total} / ${required}）`;
+        const lastGain = remaining - gainPerPill * (fullNeeded - 1);
+        if (count < fullNeeded) {
+          fullNote = `库存只有 ${recipe.owned} 颗，服到满需要 ${fullNeeded} 颗`;
+        } else if (lastGain < gainPerPill) {
+          fullNote = `最后一颗只生效 ${lastGain} 点`;
+        }
       }
     } else {
       const target = disciple.bodyTemperingTarget;
@@ -604,6 +699,20 @@ const pillOptions = computed<PillOption[]>(() => {
           ? ''
           : `本次补：${ATTRIBUTE_NAMES[target] ?? target} +${disciple.bodyTemperingGain}（已服 ${disciple.bodyTemperingUses} 次 · 剩余 ${disciple.bodyTemperingRemaining} 次）`;
       reason = '已无属性短板或淬体次数已用尽';
+
+      const plan = disciple.bodyTemperingPlan;
+      fullNeeded = plan.length;
+      const count = Math.min(fullNeeded, recipe.owned);
+      const gains = new Map<string, number>();
+      for (const step of plan.slice(0, count)) {
+        gains.set(step.attribute, (gains.get(step.attribute) ?? 0) + step.gain);
+      }
+      fullPreview = [...gains]
+        .map(([attribute, gain]) => `${ATTRIBUTE_NAMES[attribute] ?? attribute} +${gain}`)
+        .join(' · ');
+      if (count < fullNeeded) {
+        fullNote = `库存只有 ${recipe.owned} 颗，服到满需要 ${fullNeeded} 颗`;
+      }
     }
 
     if (locked) {
@@ -619,6 +728,10 @@ const pillOptions = computed<PillOption[]>(() => {
       available,
       preview: available ? preview : '',
       disabledReason: available && recipe.owned < 1 ? '丹药库存不足，请先炼制' : reason,
+      fullCount: available ? Math.min(fullNeeded, recipe.owned) : 0,
+      fullNeeded,
+      fullPreview,
+      fullNote,
     });
   }
   return options;
@@ -626,6 +739,11 @@ const pillOptions = computed<PillOption[]>(() => {
 
 function usePill(option: PillOption): void {
   if (props.busy) return;
+  // 重伤卧床期间服务端会拒绝服药（回春丹也无效），这里同步挡住（按钮已禁用，兜底键盘/程序化触发）。
+  if (severeInjured.value) {
+    emit('notify', 'warning', `${props.disciple.name}重伤卧床`, '重伤期间不能服药。');
+    return;
+  }
   // 在外历练期间服务端会拒绝服药，这里同步挡住（按钮已禁用，兜底键盘/程序化触发）。
   if (journey.value.status === 'active') {
     emit('notify', 'warning', `${props.disciple.name}正在外历练`, awayHint.value ?? '在外历练期间不能服药。');
@@ -636,7 +754,35 @@ function usePill(option: PillOption): void {
     return;
   }
   showPillPicker.value = false;
-  emit('usePill', option.pillId, props.disciple.id);
+  emit('usePill', option.pillId, props.disciple.id, 1);
+}
+
+/** 「服到满」先在列表里展开确认（写明颗数、效果与浪费/库存提示），确认后才提交。 */
+const confirmingFullPillId = ref<string | null>(null);
+
+watch(showPillPicker, (open) => {
+  if (!open) confirmingFullPillId.value = null;
+});
+
+function askUsePillToFull(option: PillOption): void {
+  if (props.busy || option.fullCount < 2) return;
+  confirmingFullPillId.value = option.pillId;
+}
+
+function confirmUsePillToFull(option: PillOption): void {
+  if (props.busy) return;
+  // 重伤卧床期间服务端会拒绝服药（回春丹也无效），这里同步挡住。
+  if (severeInjured.value) {
+    emit('notify', 'warning', `${props.disciple.name}重伤卧床`, '重伤期间不能服药。');
+    return;
+  }
+  if (journey.value.status === 'active') {
+    emit('notify', 'warning', `${props.disciple.name}正在外历练`, awayHint.value ?? '在外历练期间不能服药。');
+    return;
+  }
+  if (!option.available || option.fullCount < 2) return;
+  showPillPicker.value = false;
+  emit('usePill', option.pillId, props.disciple.id, option.fullCount);
 }
 
 /* ---------- 驱逐：在「档案」Tab 内二次确认后才 emit ---------- */
@@ -673,6 +819,135 @@ function confirmExpel(): void {
   expelSubmitted.value = true;
   emit('expel', props.disciple.id);
 }
+
+/* ---------- 0028 装备：「装备」Tab（装备视图由 SectScreen 拉取，这里只渲染与派发） ---------- */
+
+type GearAttribute = keyof DiscipleView['gear'];
+
+function isGearAttribute(attribute: string): attribute is GearAttribute {
+  return (
+    attribute === 'attack' ||
+    attribute === 'defense' ||
+    attribute === 'speed' ||
+    attribute === 'luck' ||
+    attribute === 'physique'
+  );
+}
+
+/** 该属性的装备加成；资质这类没有装备加成的属性按 0 处理。 */
+function gearBonusOf(attribute: string): number {
+  return isGearAttribute(attribute) ? props.disciple.gear[attribute] : 0;
+}
+
+/**
+ * 只要数值：`60 (+12)`（「当前 xx」这一类文案用）：括号里是该弟子的装备加成（DiscipleView.gear），为 0 时不显示。
+ * 基础属性仍是服务端给的 attack/defense/...（最高 100）；战力已由服务端计入装备，前端不自己加。
+ */
+function valueWithGear(attribute: string, value: number): string {
+  const bonus = gearBonusOf(attribute);
+  return bonus > 0 ? `${String(value)} (+${String(bonus)})` : String(value);
+}
+
+/**
+ * 概览里各个问号的说明：只写「怎么算、影响什么」，不写这名弟子的具体数值。
+ * 公式与服务端（realms.ts 的战力、names.ts 的综合评分、equipment.ts 的品质表）保持一致，改规则时同步改这里。
+ */
+const ATTRIBUTE_HELP = {
+  aptitude: [
+    '影响修炼速度：资质越高，修为涨得越快。',
+    '单人定时历练的修为收获也随资质提高。',
+    '不计入战力，没有装备加成。',
+  ].join('\n'),
+  attack: [
+    '计入战力，权重 0.4（攻防身法里最高）。',
+    '括号里是装备加成，同样计入战力。',
+    '讨伐遇到「蛮力」词缀时，攻击越高伤害越高。',
+  ].join('\n'),
+  defense: [
+    '计入战力，权重 0.35。',
+    '括号里是装备加成，同样计入战力。',
+    '讨伐遇到「铁甲」词缀时，防御越高伤害越高。',
+  ].join('\n'),
+  speed: [
+    '计入战力，权重 0.25。',
+    '括号里是装备加成，同样计入战力。',
+    '讨伐遇到「迅捷」词缀时，身法越高伤害越高。',
+  ].join('\n'),
+  luck: [
+    '不计入战力。',
+    '单人定时历练：幸运越高，额外收获的概率越高（只看基础幸运）。',
+    '讨伐：出战弟子的平均幸运决定暴击率（含装备加成）。',
+  ].join('\n'),
+  physique: [
+    '不计入战力。',
+    '单人定时历练：体魄越高，受伤概率越低（只看基础体魄）。',
+    '讨伐：体魄越高，受伤、重伤的概率越低（含装备加成）。',
+  ].join('\n'),
+};
+
+const SCORE_HELP = [
+  '综合评分 =（资质 + 攻击 + 防御 + 身法 + 幸运 + 体魄）÷ 6，保留一位小数。',
+  '只看六项基础属性：不含装备加成，也与境界、修为、天赋、战力无关。',
+].join('\n');
+
+const POWER_HELP = [
+  '战力 = 境界基数 ×（1 + 属性加权）×（1 + 装备战力加成）',
+  '境界基数 =（境界序号 × 3 + 层数）× 10：炼气一层为 10，每升一层 +10。',
+  '属性加权 =（攻击 × 0.4 + 防御 × 0.35 + 身法 × 0.25）÷ 100，攻防身法都含装备加成。',
+  '装备战力加成：每件穿着的装备按品质 凡 2% / 灵 4% / 宝 7% / 仙 10%，三件相加。',
+  '战斗天赋：最后再 × 1.15。',
+].join('\n');
+
+/** 装备的战力加成（基点 → 百分数）：品质表都是 100 基点的整数倍。 */
+function powerBonusPercent(bp: number): string {
+  return `${String(bp / 100)}%`;
+}
+
+/** 三个装备格：部位顺序由服务端给；worn 是该弟子在此部位已穿的那件（没有则 null）。 */
+const gearSlots = computed(() =>
+  (props.equipment?.slots ?? []).map((slot) => ({
+    id: slot.id,
+    name: slot.name,
+    worn:
+      props.equipment?.items.find(
+        (item) => item.slot === slot.id && item.discipleId === props.disciple.id,
+      ) ?? null,
+  })),
+);
+
+/** 在外历练 / 重伤卧床：穿、卸都会被服务端拒绝（requireNotAway），这里同步置灰并说明原因。 */
+const gearBlocked = computed(() => severeInjured.value || journey.value.status === 'active');
+
+/** 正在选装备的部位（null = 没有打开二级面板）。 */
+const gearPickerSlot = ref<EquipmentSlotId | null>(null);
+
+const gearPickerSlotName = computed(
+  () => props.equipment?.slots.find((slot) => slot.id === gearPickerSlot.value)?.name ?? '装备',
+);
+
+/** 该部位的背包装备（只列未穿戴的：跨弟子转移要先从那件装备的主人身上卸下）。 */
+const gearPickerOptions = computed<EquipmentItemView[]>(() => {
+  if (props.equipment === null || gearPickerSlot.value === null) return [];
+  const slot = gearPickerSlot.value;
+  return props.equipment.items.filter((item) => item.slot === slot && item.discipleId === null);
+});
+
+function openGearPicker(slotId: EquipmentSlotId): void {
+  if (props.busy || gearBlocked.value) return;
+  gearPickerSlot.value = slotId;
+}
+
+/** 点选即穿戴：先关掉二级面板，请求由 SectScreen 发出（成功后 state 与装备视图一起回填）。 */
+function chooseGear(item: EquipmentItemView): void {
+  if (props.busy || gearBlocked.value) return;
+  gearPickerSlot.value = null;
+  emit('equip', item.id, props.disciple.id);
+}
+
+function unequipGear(item: EquipmentItemView | null): void {
+  if (item === null || props.busy || gearBlocked.value) return;
+  emit('unequip', item.id);
+}
 </script>
 
 <template>
@@ -694,7 +969,7 @@ function confirmExpel(): void {
         <p class="disciple-detail-headline-meta">
           <span class="realm-tag">{{ disciple.stageName }}</span>
           <span class="disciple-detail-headline-realm">{{ disciple.realmName }}</span>
-          <span class="disciple-status">{{ headerStatusLabel }}</span>
+          <span class="disciple-status" :class="{ 'is-severeInjured': severeInjured }">{{ headerStatusLabel }}</span>
         </p>
       </div>
       <span class="disciple-detail-headline-frame">{{ avatarFrameOption(disciple.avatarFrameId).label }}</span>
@@ -734,12 +1009,15 @@ function confirmExpel(): void {
 
           <!-- 综合评分是服务端按「当前」六项属性等权现算的展示值，前端不复制公式、不做二次取整。 -->
           <div class="disciple-score">
-            <span class="disciple-score-label">综合评分</span>
+            <span class="disciple-score-label">综合评分 <HelpTip label="综合评分说明" :text="SCORE_HELP" /></span>
             <strong class="disciple-score-value">{{ disciple.attributeScore.toFixed(1) }}</strong>
             <span class="disciple-score-note">当前六项属性的等权平均，随淬体等属性变化更新；不含境界、修为、天赋与战力。</span>
           </div>
 
-          <!-- 雷达图与精确数值并排（窄屏自动单列）：六轴都按服务端原值绘制。 -->
+          <!--
+            雷达图与精确数值并排（窄屏自动单列）：六轴都按服务端原值绘制（基础属性，最高 100），
+            装备加成只在右侧数值列表里以 `(+n)` 标出，不参与绘图比例尺。
+          -->
           <DiscipleRadarChart
             :name="disciple.name"
             :aptitude="disciple.aptitude"
@@ -748,27 +1026,18 @@ function confirmExpel(): void {
             :speed="disciple.speed"
             :luck="disciple.luck"
             :physique="disciple.physique"
+            :gear="disciple.gear"
+            :help="ATTRIBUTE_HELP"
           />
 
           <div class="disciple-stats">
             <span class="stat-tag stat-talent">天赋 {{ disciple.talentName }}</span>
             <span class="stat-tag stat-power">战力 {{ disciple.combatPower }}</span>
+            <HelpTip label="战力说明" :text="POWER_HELP" />
           </div>
 
-          <!-- 幸运 / 体魄只作用于单人定时历练，这里把「实际作用」写在数值旁边，避免被当成战力属性。 -->
-          <dl class="disciple-attribute-effects">
-            <div>
-              <dt>幸运 {{ disciple.luck }}</dt>
-              <dd>只作用于单人定时历练：影响该次历练的额外收获概率。</dd>
-            </div>
-            <div>
-              <dt>体魄 {{ disciple.physique }}</dt>
-              <dd>只作用于单人定时历练：影响该次历练的受伤概率。</dd>
-            </div>
-          </dl>
-
           <p class="disciple-detail-hint">
-            资质影响修炼速度；攻 / 防 / 身法 决定战力。战力由服务端按攻防速与境界算出，与综合评分是两个独立数值。
+            括号里是装备加成。点属性、综合评分、战力旁的「?」查看各自的作用与算法。
           </p>
         </section>
 
@@ -792,12 +1061,12 @@ function confirmExpel(): void {
                   :class="{ 'is-selected': daoAttribute === option.value }"
                   type="button"
                   role="radio"
-                  :disabled="busy"
+                  :disabled="busy || daoRoom(option.value) <= 0"
                   :aria-checked="daoAttribute === option.value"
                   @click="daoAttribute = option.value"
                 >
                   <strong>{{ option.label }}</strong>
-                  <small>当前 {{ disciple[option.value] }}</small>
+                  <small>{{ daoRoom(option.value) <= 0 ? '已满 100' : `当前 ${valueWithGear(option.value, disciple[option.value])}` }}</small>
                 </button>
               </li>
             </ul>
@@ -828,6 +1097,7 @@ function confirmExpel(): void {
               本次可分配 1 ~ {{ daoPointsMax }} 点
             </p>
           </template>
+          <p v-else-if="daoBlockedReason !== null" class="disciple-note-meta">{{ daoBlockedReason }}</p>
 
           <ModalShell v-if="showDaoInsightHelp" narrow label="悟道值说明" @close="showDaoInsightHelp = false">
             <section class="dao-insight-help-card" aria-labelledby="dao-insight-help-title">
@@ -908,16 +1178,17 @@ function confirmExpel(): void {
           <AssignmentSelect
             :model-value="disciple.assignment"
             :options="state.assignments"
-            :disabled="busy || journey.status === 'active'"
+            :disabled="busy || journey.status === 'active' || severeInjured"
             :label="disciple.name"
             @change="emit('assign', disciple.id, $event)"
           />
-          <p v-if="awayHint" class="blocked-hint">{{ awayHint }}</p>
+          <p v-if="actionBlockHint" class="blocked-hint">{{ actionBlockHint }}</p>
         </section>
 
         <section class="disciple-detail-section" aria-labelledby="disciple-injury-title">
           <h3 id="disciple-injury-title" class="disciple-detail-title">伤势</h3>
-          <p v-if="injured" class="disciple-detail-injury">
+          <p v-if="severeLabel !== null" class="disciple-detail-injury">{{ severeLabel }}</p>
+          <p v-else-if="injured" class="disciple-detail-injury">
             疗伤中 · 预计 {{ formatTime(disciple.injuredUntil) }} 复原
           </p>
           <p v-else class="disciple-detail-hint">无恙，可以出战、探索与破境。</p>
@@ -937,13 +1208,13 @@ function confirmExpel(): void {
           </dl>
           <p v-if="disciple.blockedReason" class="blocked-hint">{{ disciple.blockedReason }}</p>
           <!-- 在外时即便服务端还没把 canBreakthrough 打成 false，也一律挡住破境。 -->
-          <p v-if="awayHint" class="blocked-hint">{{ awayHint }}</p>
+          <p v-if="actionBlockHint" class="blocked-hint">{{ actionBlockHint }}</p>
           <button
             class="action-button primary-action disciple-break-button"
-            :class="{ 'is-disabled': !disciple.canBreakthrough || journey.status === 'active' }"
+            :class="{ 'is-disabled': !disciple.canBreakthrough || journey.status === 'active' || severeInjured }"
             type="button"
-            :disabled="busy || journey.status === 'active'"
-            :aria-disabled="!disciple.canBreakthrough || journey.status === 'active'"
+            :disabled="busy || journey.status === 'active' || severeInjured"
+            :aria-disabled="!disciple.canBreakthrough || journey.status === 'active' || severeInjured"
             @click="requestBreakthrough"
           >
             <span>破境</span>
@@ -958,13 +1229,81 @@ function confirmExpel(): void {
           <button
             class="action-button primary-action disciple-pill-launch"
             type="button"
-            :disabled="busy || !state.alchemy.unlocked || journey.status === 'active'"
+            :disabled="busy || !state.alchemy.unlocked || journey.status === 'active' || severeInjured"
             @click="showPillPicker = true"
           >
             服用丹药
           </button>
-          <p v-if="awayHint" class="blocked-hint">{{ awayHint }}</p>
+          <p v-if="actionBlockHint" class="blocked-hint">{{ actionBlockHint }}</p>
           <p class="disciple-detail-hint">点击后选择丹药；配方炼制仍在「炼丹」面板。</p>
+        </section>
+      </div>
+
+      <!-- ---------- 装备 ---------- -->
+      <div
+        v-show="activeTab === 'gear'"
+        :id="tabPanelId('gear')"
+        class="disciple-tab-panel"
+        role="tabpanel"
+        :aria-labelledby="tabButtonId('gear')"
+        tabindex="0"
+      >
+        <section class="disciple-detail-section disciple-gear" aria-labelledby="disciple-gear-title">
+          <h3 id="disciple-gear-title" class="disciple-detail-title">装备</h3>
+
+          <p v-if="equipment === null" class="disciple-detail-hint">正在清点宗门装备…</p>
+
+          <template v-else>
+            <p v-if="gearBlocked" class="blocked-hint">
+              {{ actionBlockHint ?? '在外历练或重伤卧床期间不能穿、卸装备。' }}
+            </p>
+
+            <ul class="gear-slots">
+              <li
+                v-for="slot in gearSlots"
+                :key="slot.id"
+                class="gear-slot"
+                :style="slot.worn === null ? undefined : { borderColor: slot.worn.color }"
+              >
+                <button
+                  class="gear-slot-body"
+                  type="button"
+                  :disabled="busy || gearBlocked"
+                  :aria-disabled="busy || gearBlocked"
+                  :aria-label="`${slot.name}：${slot.worn === null ? '未装备' : slot.worn.name}，点击选择装备`"
+                  @click="openGearPicker(slot.id)"
+                >
+                  <span class="gear-slot-label">{{ slot.name }}</span>
+                  <template v-if="slot.worn !== null">
+                    <strong class="gear-slot-name" :style="{ color: slot.worn.color }">{{ slot.worn.name }}</strong>
+                    <span class="gear-slot-attrs">
+                      主属性 {{ slot.worn.mainAttrName }} +{{ slot.worn.mainValue }} · 副属性
+                      {{ slot.worn.subAttrName }} +{{ slot.worn.subValue }} · 战力
+                      +{{ powerBonusPercent(slot.worn.powerBonusBp) }}
+                    </span>
+                  </template>
+                  <span v-else class="gear-slot-empty">未装备</span>
+                </button>
+
+                <button
+                  v-if="slot.worn !== null"
+                  class="quiet-button gear-unequip"
+                  type="button"
+                  :disabled="busy || gearBlocked"
+                  :aria-disabled="busy || gearBlocked"
+                  :aria-label="`卸下 ${slot.worn.name}`"
+                  @click="unequipGear(slot.worn)"
+                >
+                  卸下
+                </button>
+              </li>
+            </ul>
+
+            <p class="disciple-detail-hint">
+              装备战力加成合计 +{{ powerBonusPercent(disciple.gearPowerBonusBp) }}（凡 2% / 灵 4% / 宝 7% / 仙 10%，三件相加）。
+              点格子从背包里挑一件同部位的装备穿上；换下来的那件自动回背包（穿在身上的不占背包）。
+            </p>
+          </template>
         </section>
       </div>
 
@@ -985,16 +1324,16 @@ function confirmExpel(): void {
           </p>
 
           <template v-if="journey.status === 'none'">
-            <!-- 不可出发时只显示服务端的原因（筑基门槛 / 疗伤中 / 名额已满 / 在守擂阵容中）。 -->
-            <template v-if="!journey.canStart">
-              <p class="blocked-hint">{{ journey.blockedReason ?? '当前不可出发' }}</p>
+            <!-- 不可出发时只显示原因：重伤卧床优先，其余用服务端的原因（筑基门槛 / 疗伤中 / 名额已满 / 在守擂阵容中）。 -->
+            <template v-if="!journeyStartable">
+              <p class="blocked-hint">{{ severeHint ?? (journey.blockedReason ?? '当前不可出发') }}</p>
               <button class="action-button primary-action disciple-journey-start" type="button" disabled>
                 <span>确认出发</span>
               </button>
             </template>
 
             <button
-              v-if="journey.canStart && planner === null && !journeyPreviewLoading"
+              v-if="journeyStartable && planner === null && !journeyPreviewLoading"
               class="action-button primary-action disciple-journey-launch"
               type="button"
               :disabled="busy"
@@ -1010,7 +1349,7 @@ function confirmExpel(): void {
               detail="正在计算各方向的奖励、修为与风险。"
             />
 
-            <div v-if="journey.canStart && planner !== null" class="disciple-journey-planner">
+            <div v-if="journeyStartable && planner !== null" class="disciple-journey-planner">
               <p class="disciple-detail-hint">
                 {{ planner.discipleName }} 可出发 · 宗门在外 {{ planner.activeCount }}/{{ planner.maxConcurrent }} 人
               </p>
@@ -1371,16 +1710,101 @@ function confirmExpel(): void {
                 {{ option.owned < 1 ? '丹药库存不足，请先炼制' : option.disabledReason }}
               </p>
             </div>
-            <button
-              class="upgrade-button disciple-pill-button"
-              type="button"
-              :disabled="busy || !option.available || option.owned < 1"
-              @click="usePill(option)"
+            <div class="disciple-pill-actions">
+              <button
+                class="upgrade-button disciple-pill-button"
+                type="button"
+                :disabled="busy || !option.available || option.owned < 1"
+                @click="usePill(option)"
+              >
+                <span>{{ option.fullCount >= 2 ? '服 1 颗' : '服用' }}</span>
+              </button>
+              <button
+                v-if="option.fullCount >= 2"
+                class="upgrade-button disciple-pill-button"
+                type="button"
+                :disabled="busy"
+                :aria-expanded="confirmingFullPillId === option.pillId"
+                @click="askUsePillToFull(option)"
+              >
+                <span>服到满 · 需 {{ option.fullNeeded }} 颗</span>
+              </button>
+            </div>
+            <div
+              v-if="confirmingFullPillId === option.pillId"
+              class="disciple-pill-confirm"
+              role="group"
+              :aria-label="`确认服到满 · ${option.name}`"
             >
-              <span>选择</span>
+              <p>
+                将服用 <strong>{{ option.fullCount }}</strong> 颗{{ option.name }}：{{ option.fullPreview }}
+              </p>
+              <p v-if="option.fullNote !== ''" class="disciple-pill-confirm-note">{{ option.fullNote }}</p>
+              <div class="disciple-pill-confirm-actions">
+                <button class="upgrade-button" type="button" @click="confirmingFullPillId = null">取消</button>
+                <button
+                  class="action-button primary-action"
+                  type="button"
+                  :disabled="busy"
+                  @click="confirmUsePillToFull(option)"
+                >
+                  确认服用
+                </button>
+              </div>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </ModalShell>
+
+    <!-- 二级弹窗：该部位的背包装备，点选即穿戴（Esc / 点遮罩只关这一层）。 -->
+    <ModalShell
+      v-if="gearPickerSlot !== null"
+      narrow
+      :label="`选择${gearPickerSlotName} · ${disciple.name}`"
+      @close="gearPickerSlot = null"
+    >
+      <section class="gear-picker" aria-labelledby="gear-picker-title">
+        <header class="section-heading panel-heading compact-heading">
+          <div>
+            <p class="eyebrow">兵甲库</p>
+            <h2 id="gear-picker-title">选择{{ gearPickerSlotName }}</h2>
+          </div>
+          <span v-if="equipment" class="count-badge">
+            背包 {{ equipment.bagCount }}/{{ equipment.bagCapacity }}
+          </span>
+        </header>
+
+        <p v-if="gearBlocked" class="blocked-hint">
+          {{ actionBlockHint ?? '在外历练或重伤卧床期间不能更换装备。' }}
+        </p>
+
+        <ul v-if="gearPickerOptions.length > 0" class="gear-picker-list">
+          <li
+            v-for="item in gearPickerOptions"
+            :key="item.id"
+            class="gear-picker-item"
+            :style="{ borderColor: item.color }"
+          >
+            <div class="gear-picker-copy">
+              <strong :style="{ color: item.color }">{{ item.name }}</strong>
+              <p>
+                主属性 {{ item.mainAttrName }} +{{ item.mainValue }} · 副属性 {{ item.subAttrName }} +{{ item.subValue }}
+                · 战力 +{{ powerBonusPercent(item.powerBonusBp) }}
+              </p>
+            </div>
+            <button
+              class="upgrade-button gear-picker-button"
+              type="button"
+              :disabled="busy || gearBlocked"
+              :aria-disabled="busy || gearBlocked"
+              @click="chooseGear(item)"
+            >
+              <span>穿戴</span>
             </button>
           </li>
         </ul>
+        <p v-else class="blocked-hint">背包里没有这个部位的装备：先去「炼器」打造，或等妖王掉落。</p>
       </section>
     </ModalShell>
   </section>

@@ -39,3 +39,27 @@ export function formatTime(iso: string | null): string {
     date.getMinutes(),
   ).padStart(2, '0')}`;
 }
+
+const MINUTE_MS = 60_000;
+const MINUTES_PER_HOUR = 60;
+const MINUTES_PER_DAY = 60 * 24;
+
+/**
+ * 重伤剩余时间的短文案：满 1 天 → 「2天5时」；满 1 小时 → 「5时20分」；否则 → 「18分」（最少 1 分）。
+ * 与后端 `apps/server/src/modules/game/constants.ts` 的 `severeInjuryLeftText` 保持完全一致，
+ * 两边的文案不能各写一套。只做展示，不判定状态。
+ */
+export function severeInjuryLeftText(untilMs: number, nowMs: number): string {
+  const minutes = Math.ceil(Math.max(0, untilMs - nowMs) / MINUTE_MS);
+  if (minutes >= MINUTES_PER_DAY) {
+    const days = Math.floor(minutes / MINUTES_PER_DAY);
+    const hours = Math.floor((minutes % MINUTES_PER_DAY) / MINUTES_PER_HOUR);
+    return `${String(days)}天${String(hours)}时`;
+  }
+  if (minutes >= MINUTES_PER_HOUR) {
+    const hours = Math.floor(minutes / MINUTES_PER_HOUR);
+    const rest = minutes % MINUTES_PER_HOUR;
+    return `${String(hours)}时${String(rest)}分`;
+  }
+  return `${String(Math.max(1, minutes))}分`;
+}

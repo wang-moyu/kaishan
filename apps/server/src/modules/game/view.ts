@@ -2,11 +2,15 @@ import type { GameConfigContent } from '@xiuxian/game-core';
 
 import {
   alchemyUnlockBlockedReason,
+  bodyTemperingPlan,
   bodyTemperingTarget,
+  cultivationPillsToFull,
   firstInsufficientResource,
+  type BodyTemperingStep,
   BODY_TEMPERING_MAX_USES,
   PILL_RECIPES,
   CULTIVATION_PILL_GAIN,
+  MAX_CRAFT_QUANTITY,
 } from './alchemy';
 import {
   CHALLENGE_DAILY_LIMIT,
@@ -34,10 +38,7 @@ import {
   IDLE_ASSIGNMENT,
   SPIRITUAL_ARRAY_BUILDING_ID,
   SCRIPTURE_LIBRARY_BUILDING_ID,
-  STONE_MINING_ASSIGNMENT,
-  STONE_MINING_LIMIT_HIGH,
-  STONE_MINING_LIMIT_LOW,
-  STONE_MINING_UNLOCK_SECT_LEVEL,
+  assignmentLimitOf,
   breakthroughEnergyCost,
   effectiveCapacity,
   findRealm,
@@ -46,6 +47,7 @@ import {
   findTalent,
   nextSectLevel,
   realmIndex,
+  isSeverelyInjured,
 } from './constants';
 import { RECENT_EVENTS_IN_SYNC, eventNameOf, type TriggeredEvent } from './events';
 import {
@@ -57,10 +59,33 @@ import {
   SECT_RENAME_COST,
   attributeScore,
 } from './names';
+import {
+  ARTIFACT_MAIN_ATTRS,
+  BAG_CAPACITY,
+  EQUIPMENT_QUALITIES,
+  EQUIPMENT_SLOTS,
+  FORGE_COST,
+  FORGE_QUALITY,
+  FORGE_RECIPES,
+  FORGE_WORKSHOP_ID,
+  forgeOddsOf,
+  forgeWorkshopUpgradeFrom,
+  attrNameOf,
+  forgeUnlockBlockedReason,
+  gearBonusOfDisciple,
+  gearPowerBonusBpOfDisciple,
+  qualityPowerBonusBp,
+  qualityColorOf,
+  qualityNameOf,
+  slotNameOf,
+  withGear,
+  type AttrSet,
+} from './equipment';
 import { discipleCombatPower } from './realms';
 import type {
   BuildingRow,
   DiscipleRow,
+  EquipmentRow,
   EventLogRow,
   PillInventoryRow,
   ResourceBalanceRow,
@@ -82,6 +107,7 @@ import {
   parseJourneyRewardResources,
 } from './journey';
 import { cultivationRatePerHour, resourceRates, type DiscipleState, type SettleResult } from './settle';
+import type { WorldBossPhase } from './worldBoss';
 /**
  * 接口返回的视图类型（前端只读这些字段，不需要再读配置）。
  *
@@ -127,8 +153,15 @@ export interface DiscipleView {
   /** 天赋 id 与展示名（无/未知天赋时 talentName 为「无」）。 */
   talent: string;
   talentName: string;
-  /** 当前战力（展示用，由 realms.ts 的 discipleCombatPower 现算）。 */
+  /**
+   * 当前战力（展示用，由 realms.ts 的 discipleCombatPower 现算）。
+   * 0028 起**计入装备**：属性用的是「基础属性 + 装备加成」（见下面的 gear）。
+   */
   combatPower: number;
+  /** 0028 装备加成（5 项属性各自一件件加起来的和）；没有装备时全 0。 */
+  gear: AttrSet;
+  /** 0032 装备战力加成（基点）：身上装备按品质相加，战力再乘 (1 + 它 / 10000)；没有装备时 0。 */
+  gearPowerBonusBp: number;
   /**
    * 0016 综合评分：**当前**六项属性等权现算，固定一位小数（names.ts 的 attributeScore）。
    * 不是战力、也不是岗位效率：境界、修为、天赋、战力都不参与；不落库，
@@ -151,7 +184,14 @@ export interface DiscipleView {
   assignment: string;
   assignmentName: string;
   injuredUntil: string | null;
+  /** 二期阶段一：重伤到期时间（ISO 字符串）；null = 未重伤。 */
+  severeInjuredUntil: string | null;
   canBreakthrough: boolean;
+  /**
+   * 除灵气外的破境条件都已满足（未在外、未到版本上限、未疗伤、修为到门槛）。
+   * 批量破境按这个挑人：灵气由整批合计后再判断够不够。
+   */
+  breakthroughReadyExceptEnergy: boolean;
   blockedReason: string | null;
   breakthroughCost: string;
   breakthroughChanceBp: number;
@@ -162,6 +202,10 @@ export interface DiscipleView {
   bodyTemperingTarget: 'attack' | 'defense' | 'speed' | null;
   /** 本次服用淬体丹的提升量；无短板时为 0。 */
   bodyTemperingGain: number;
+  /** 聚气丹「服到满」（修为达到突破门槛）需要几颗；0 = 不可服用。 */
+  cultivationPillsToFull: number;
+  /** 淬体丹「服到满」的逐颗计划（每颗补哪项、补多少）；长度即需要几颗，空 = 不可服用。 */
+  bodyTemperingPlan: BodyTemperingStep[];
   /** 0019 悟道值：当前可用余额（非负整数；本版本只能通过论道赌局获得）。 */
   daoInsight: number;
   /** 0019 悟道值：累计已分配点数（上限 DAO_INSIGHT_CAP = 50）。 */
@@ -253,6 +297,174 @@ export interface AlchemyView {
    * 由服务端下发，前端只渲染，避免在 UI 里复制一份丹药常量（计划 2.3「不复制判定公式」）。
    */
   cultivationPillGain: number;
+  /** 单次炼制的数量上限（= alchemy.ts 的 MAX_CRAFT_QUANTITY），前端步进器据此封顶。 */
+  maxCraftQuantity: number;
+}
+
+/* ---------- 0028 装备（一期的装备面板视图；明细不进 /game/sync） ---------- */
+
+/**
+ * 单件装备视图（背包卡片与弟子装备格共用）。
+ * 品质名 / 颜色、部位名、属性名都由服务端下发，前端只渲染，不复制一份规则表。
+ */
+export interface EquipmentItemView {
+  id: string;
+  /** weapon | armor | artifact。 */
+  slot: string;
+  slotName: string;
+  /** common | spirit | treasure | immortal。 */
+  quality: string;
+  qualityName: string;
+  /** 面板边框颜色（品质色）。 */
+  color: string;
+  /** `{品质名}·{部位名}`。 */
+  name: string;
+  mainAttr: string;
+  mainAttrName: string;
+  mainValue: number;
+  subAttr: string;
+  subAttrName: string;
+  subValue: number;
+  /** forge | boss。 */
+  source: string;
+  /** 0032 穿在身上时给弟子的战力加成（基点，按品质：凡 200 / 灵 400 / 宝 700 / 仙 1000）。 */
+  powerBonusBp: number;
+  /** 穿在谁身上；null = 在背包里（背包 = 本宗门未穿戴的装备）。 */
+  discipleId: string | null;
+  discipleName: string | null;
+  createdAt: string;
+}
+
+/**
+ * 装备面板视图（GET /game/equipment）。
+ * 解锁判断、背包计数、炼器价格、可选部位与主属性候选、分解返还都由服务端算好。
+ */
+export interface EquipmentView {
+  unlocked: boolean;
+  blockedReason: string | null;
+  /** 背包已用件数（穿在身上的不占背包）。 */
+  bagCount: number;
+  bagCapacity: number;
+  /** 单次炼器消耗（最小单位）。 */
+  forgeCost: Record<string, string>;
+  /** 默认品质（凡品）。 */
+  forgeQuality: string;
+  forgeQualityName: string;
+  /** 装备二期：炼器坊等级（决定可炼的最高品质）。 */
+  workshopLevel: number;
+  /** 装备二期：各品质的炼造选项（消耗为最小单位；unlocked = 炼器坊等级已够）。 */
+  forgeOptions: {
+    quality: string;
+    name: string;
+    color: string;
+    workshopLevel: number;
+    unlocked: boolean;
+    cost: Record<string, string>;
+    /** 按当前炼器坊等级算的成功 / 降级 / 失败概率（0~1）。 */
+    odds: { success: number; downgrade: number; fail: number };
+  }[];
+  /** 可炼部位；法器的 mainAttrChoices 非空（玩家必须选身法或幸运）。 */
+  slots: {
+    id: string;
+    name: string;
+    mainAttrChoices: { id: string; name: string }[];
+  }[];
+  /** 分解返还的矿石（展示单位），按品质 id 给：前端在二次确认里直接显示。 */
+  salvageOre: Record<string, number>;
+  /** 本宗全部装备（背包 + 已穿戴），新的在前。 */
+  items: EquipmentItemView[];
+}
+
+/** 可选部位（炼器与功勋兑换共用）：法器的 mainAttrChoices 非空（必须选身法或幸运）。 */
+export function equipmentSlotViews(): { id: string; name: string; mainAttrChoices: { id: string; name: string }[] }[] {
+  return EQUIPMENT_SLOTS.map((slot) => ({
+    id: slot.id,
+    name: slot.name,
+    mainAttrChoices:
+      slot.id === 'artifact'
+        ? ARTIFACT_MAIN_ATTRS.map((attr) => ({ id: attr, name: attrNameOf(attr) }))
+        : [],
+  }));
+}
+
+/** 功勋兑换（GET /game/merit-shop）：分类、价目、可选部位都由服务端给，前端只渲染。 */
+export interface MeritShopView {
+  categories: { id: string; name: string }[];
+  items: {
+    id: string;
+    name: string;
+    /** 价格（功勋，展示单位）。 */
+    cost: number;
+    category: string;
+    /** 装备类的品质与品质色；资源类为 null。 */
+    quality: string | null;
+    color: string | null;
+  }[];
+  slots: { id: string; name: string; mainAttrChoices: { id: string; name: string }[] }[];
+  /** 资源类一次最多兑换几个。 */
+  maxResourceQuantity: number;
+}
+
+/** 装备行 → 视图（纯映射；discipleName 由调用方按本宗弟子表查好）。 */
+export function equipmentItemViewOf(row: EquipmentRow, discipleName: string | null): EquipmentItemView {
+  return {
+    id: row.id,
+    slot: row.slot,
+    slotName: slotNameOf(row.slot),
+    quality: row.quality,
+    qualityName: qualityNameOf(row.quality),
+    color: qualityColorOf(row.quality),
+    name: row.name,
+    mainAttr: row.main_attr,
+    mainAttrName: attrNameOf(row.main_attr),
+    mainValue: Number(row.main_value),
+    subAttr: row.sub_attr,
+    subAttrName: attrNameOf(row.sub_attr),
+    subValue: Number(row.sub_value),
+    source: row.source,
+    powerBonusBp: qualityPowerBonusBp(row.quality),
+    discipleId: row.disciple_id,
+    discipleName: row.disciple_id === null ? null : discipleName,
+    createdAt: new Date(Number(row.created_at)).toISOString(),
+  };
+}
+
+export function buildEquipmentView(input: {
+  sectLevel: number;
+  workshopLevel: number;
+  items: readonly EquipmentRow[];
+  bagCount: number;
+  discipleNames: ReadonlyMap<string, string>;
+}): EquipmentView {
+  return {
+    unlocked: forgeUnlockBlockedReason(input.sectLevel) === null,
+    blockedReason: forgeUnlockBlockedReason(input.sectLevel),
+    bagCount: input.bagCount,
+    bagCapacity: BAG_CAPACITY,
+    forgeCost: { ...FORGE_COST },
+    forgeQuality: FORGE_QUALITY,
+    forgeQualityName: qualityNameOf(FORGE_QUALITY),
+    workshopLevel: input.workshopLevel,
+    forgeOptions: FORGE_RECIPES.map((recipe) => ({
+      quality: recipe.quality,
+      name: qualityNameOf(recipe.quality),
+      color: qualityColorOf(recipe.quality),
+      workshopLevel: recipe.workshopLevel,
+      unlocked: input.workshopLevel >= recipe.workshopLevel,
+      cost: { ...recipe.cost },
+      odds: forgeOddsOf(recipe.quality, Math.max(input.workshopLevel, recipe.workshopLevel)),
+    })),
+    slots: equipmentSlotViews(),
+    salvageOre: Object.fromEntries(
+      EQUIPMENT_QUALITIES.map((quality) => [quality.id, quality.salvageOre]),
+    ),
+    items: input.items.map((row) =>
+      equipmentItemViewOf(
+        row,
+        row.disciple_id === null ? null : (input.discipleNames.get(row.disciple_id) ?? null),
+      ),
+    ),
+  };
 }
 
 /**
@@ -733,6 +945,171 @@ export interface RenameView {
   discipleNameMaxChars: number;
 }
 
+/* ---------- 0025/0027 世界 Boss（讨伐，二期） ---------- */
+
+/** Boss 的展示定义（名字、印章字、主色都由服务端给，前端不复制常量）。 */
+export interface WorldBossDefView {
+  index: number;
+  /** 基础名（如「黑风妖王」）。 */
+  name: string;
+  /** 带关卡的显示名（如「第 2 关 · 赤炎火蛟」）。 */
+  displayName: string;
+  /** 圆形印章中间的字。 */
+  sealCharacter: string;
+  /** 主色。 */
+  color: string;
+  description: string;
+}
+
+/** 本关随机词缀（前端据此显示标签与气泡）。 */
+export interface WorldBossAffixView {
+  id: string;
+  name: string;
+  /** 效果文案（保持简短）。 */
+  effect: string;
+  /** 配队提示。 */
+  tip: string;
+  /** 推荐排序属性（前端在选人组件里追加一个排序按钮）。 */
+  sortAttribute: 'attack' | 'defense' | 'speed' | 'luck' | 'physique';
+}
+
+/** 本关伤害榜的一行（按宗门汇总）。 */
+export interface WorldBossRankView {
+  sectId: string;
+  sectName: string;
+  /** 本关总伤害。 */
+  damage: number;
+  /** 出手次数。 */
+  attempts: number;
+  /** 本关伤害最高的宗门（并列取先达到者）。 */
+  isTopDamage: boolean;
+  /** 打出最后一击。 */
+  isLastHit: boolean;
+  /** 是不是自己宗门（前端高亮）。 */
+  isMe: boolean;
+}
+
+/** 一条出手记录（也用作历史最强一击）。 */
+export interface WorldBossHitView {
+  sectId: string;
+  sectName: string;
+  discipleNames: string[];
+  /** 本次受伤（普通受伤，30 分钟）的弟子名。 */
+  injuredNames: string[];
+  /** 本次被打成重伤（静养 1 天）的弟子名。 */
+  severeNames: string[];
+  damage: number;
+  isCrit: boolean;
+  isLastHit: boolean;
+  createdAt: number;
+}
+
+/** 当前关卡（今天还没有 Boss 时为 null）。 */
+export interface WorldBossCurrentView {
+  id: string;
+  /** UTC+8 日期键。 */
+  dayKey: string;
+  /** 第几关（每天从 1 开始，连战递增）。 */
+  stage: number;
+  def: WorldBossDefView;
+  affix: WorldBossAffixView;
+  maxHp: number;
+  hp: number;
+  status: 'active' | 'killed' | 'fled';
+  /** UTC+8 的阶段（未出现 / 讨伐中 / 力竭中 / 已结束）。 */
+  phase: WorldBossPhase;
+  /** 击杀它的宗门名；未击杀为 null。 */
+  killerSectName: string | null;
+  /** 逃走时的结果：'repelled' = 已击退（打掉 ≥70%）、'escaped' = 逃走了；其他状态为 null。 */
+  fledOutcome: 'repelled' | 'escaped' | null;
+  endedAt: number | null;
+}
+
+/** 一次出手里某名弟子的判定结果。 */
+export interface WorldBossMemberOutcomeView {
+  discipleId: string;
+  discipleName: string;
+  /** normal = 正常；injured = 普通受伤（30 分钟）；severe = 重伤（静养 1 天）。 */
+  outcome: 'normal' | 'injured' | 'severe';
+}
+
+/** 讨伐面板（GET /game/world-boss 的返回值）。 */
+export interface WorldBossView {
+  /** 当前关卡；null = 今天还没出现。 */
+  boss: WorldBossCurrentView | null;
+  /** 今天的阶段（boss 为 null 时同样给出）。 */
+  phase: WorldBossPhase;
+  /** 今天的 Boss 出现时间点（毫秒），用于「08:00 降临」提示。 */
+  opensAt: number;
+  /** 距离 23:00 结束的秒数（已结束为 0）。 */
+  remainingSeconds: number;
+  /** 今日已连斩 N 只。 */
+  killedToday: number;
+  /** 史上最高「一天连斩 M 只」。 */
+  bestStage: number;
+  /** 出手冷却剩余秒数（0 = 现在就能出手）。 */
+  cooldownSeconds: number;
+  /** 本宗门弟子的疲劳表：弟子 id → 最近 60 分钟内已出战讨伐的次数。 */
+  fatigue: Record<string, number>;
+  /** 本宗门弟子最近 60 分钟内每次出战讨伐的时间（毫秒，升序），用于「冒进冷却」倒计时。 */
+  fatigueTimes: Record<string, number[]>;
+  /** 此刻能否出手：Boss 仍在讨伐中 + 在开放时段 + 今日出手次数没用满。 */
+  attackable: boolean;
+  /** 本宗门今天（UTC+8 自然日）已出手次数。 */
+  attacksToday: number;
+  /** 每日出手上限（0 = 不限；服务端环境变量 WORLD_BOSS_DAILY_ATTACK_LIMIT）。 */
+  dailyAttackLimit: number;
+  /** 本关伤害榜（伤害高的在前）。 */
+  ranks: WorldBossRankView[];
+  /** 出手记录（新的在前，最多 20 条）。 */
+  hits: WorldBossHitView[];
+  /** 历史最强一击（全服）。 */
+  topHit: WorldBossHitView | null;
+  /** 奖励预览：当前关卡、按本宗门此刻产出算的各名次奖励（面板「奖励」按钮）。 */
+  rewardPreview: WorldBossRewardPreviewView | null;
+  /** 三期：本宗门在当前关的掉落概率（boss 为 null 时为 null）。 */
+  myDrop: {
+    /** 本宗门对本关的伤害占比（0~1；还没出手为 0）。 */
+    damageShare: number;
+    /** 击杀时掉高档装备的概率（0~1）。 */
+    highChance: number;
+    highQualityName: string;
+    lowQualityName: string;
+  } | null;
+}
+
+/** 奖励预览：rank 4 表示「第 4 名及以后」；资源为最小单位。 */
+export interface WorldBossRewardPreviewView {
+  stage: number;
+  tiers: { rank: number; multiplier: number; resources: Record<string, number>; topDamagePill: boolean }[];
+  /** 0028：当前关卡的装备掉落说明（服务端按 equipment.ts 的品质表拼好，前端只渲染）。 */
+  dropDescription: string;
+  lastHitStone: number;
+  /** 装备二期：本关击杀的玄铁（展示单位）；伤害占比 ≥ minSharePercent% 才有，第 1 名拿 top。三期：不足门槛时每关 below 个。 */
+  xuantie: { top: number; others: number; minSharePercent: number; below: number };
+  /** 三期：本关伤害占比 100% 时的功勋（展示单位）；实际按 √占比 折算，保底 2。 */
+  meritFullShare: number;
+}
+
+/** 一次出手的结果（POST /game/world-boss/attack 的 result）。 */
+export interface WorldBossAttackResultView {
+  /** 本次伤害（账面伤害，未按剩余血量截断）。 */
+  damage: number;
+  /** 实际扣血（= min(伤害, 出手前的血量)）。 */
+  actualDamage: number;
+  crit: boolean;
+  /** 是否处于力竭期（伤害 ×1.5）。 */
+  frenzy: boolean;
+  /** 是否由本次出手击杀（最后一击）。 */
+  lastHit: boolean;
+  bossHp: number;
+  bossMaxHp: number;
+  /** 击杀后立刻生成的下一关关卡号；没击杀为 null。 */
+  nextStage: number | null;
+  /** 本次每名弟子的判定结果（正常 / 受伤 / 重伤）。 */
+  members: WorldBossMemberOutcomeView[];
+}
+
 export interface SectStateView {
   sect: {
     id: string;
@@ -797,6 +1174,8 @@ export interface SectStateView {
   journey: JourneyView;
   /** V6 交互式秘境探索：本宗当前进行中的一局；没有则 null（每宗门同时最多一局）。 */
   activeExploration: ActiveExplorationView | null;
+  /** 0025 世界 Boss（讨伐）：是否可出手（按钮角标用；只有 sync 会算真值）。 */
+  worldBoss: { attackable: boolean };
 }
 
 /** 秘境列表视图（GET /game/realms）：规则（锁定/次数）由服务端算好，前端只渲染。 */
@@ -807,6 +1186,8 @@ export interface SecretRealmListView {
   difficulty: number;
   entryCost: Record<string, string>;
   rewards: Record<string, string>;
+  /** 装备二期：成功时的概率掉落说明（如「玄铁 1~2（15%）」）；没有则为 null。 */
+  bonusDropText: string | null;
   minParty: number;
   maxParty: number;
   /** 每日探索次数上限；null = 不限。 */
@@ -875,14 +1256,70 @@ export interface DiscipleLeaderboardEntryView {
   attributeScore: number;
   talent: string;
   talentName: string;
+  /** 0032 装备战力加成（基点）：身上装备按品质相加；没穿装备为 0。 */
+  gearPowerBonusBp: number;
+  /**
+   * 装备榜才有：三个部位各穿了什么品质（按 EQUIPMENT_SLOTS 的顺序；没穿的部位 quality 为 null）。
+   * 战力榜 / 综合榜不查装备表，这一项省略。
+   */
+  gearSlots?: DiscipleLeaderboardGearSlotView[];
   /** 是否属于当前用户的宗门。 */
   isMe: boolean;
 }
 
-/** 弟子榜单（GET /game/disciple-leaderboard）：战力 top 10 + 综合分 top 10。 */
+/** 装备榜一行里的一个部位。 */
+export interface DiscipleLeaderboardGearSlotView {
+  slot: string;
+  slotName: string;
+  quality: string | null;
+  qualityName: string | null;
+  /** 品质色；没穿为 null。 */
+  color: string | null;
+}
+
+/** 弟子榜单（GET /game/disciple-leaderboard）：战力 / 综合分 / 装备 各 top 10。 */
 export interface DiscipleLeaderboardView {
   byCombatPower: DiscipleLeaderboardEntryView[];
   byAttributeScore: DiscipleLeaderboardEntryView[];
+  /** 0032 装备榜：按装备战力加成排，同分比装备属性总和、再比战力；没穿装备的不上榜。 */
+  byEquipment: DiscipleLeaderboardEntryView[];
+}
+
+/** 天骄榜点开的弟子公开档案：只含公开字段（不含掌门备注、修为数值、差遣与历练）。 */
+export interface DiscipleProfileView {
+  discipleId: string;
+  name: string;
+  gender: string;
+  realmId: string;
+  frameId: string;
+  sectId: string;
+  sectName: string;
+  /** 是不是观看者自己宗门的弟子。 */
+  isMe: boolean;
+  realmName: string;
+  stageName: string;
+  talent: string;
+  talentName: string;
+  talentDescription: string;
+  /** 基础属性（最高 100，不含装备）。 */
+  aptitude: number;
+  attack: number;
+  defense: number;
+  speed: number;
+  luck: number;
+  physique: number;
+  /** 装备加成（已穿装备 5 项之和）。 */
+  gear: { attack: number; defense: number; speed: number; luck: number; physique: number };
+  /** 战力（计入装备，与天骄榜同口径）。 */
+  combatPower: number;
+  /** 综合评分（六项基础属性等权，不计装备）。 */
+  attributeScore: number;
+  bodyTemperingUses: number;
+  daoInsightUsed: number;
+  /** 当前伤势：severe = 重伤卧床，injured = 负伤，null = 无。 */
+  injury: 'severe' | 'injured' | null;
+  /** 已穿戴的装备（按部位排序）。 */
+  equipment: EquipmentItemView[];
 }
 
 /** 全服聊天消息条目（GET /game/chat）。 */
@@ -1111,6 +1548,11 @@ export interface SectStateInput {
    */
   activeExploration?: ActiveExplorationView | null;
   capacityMultiplier: number;
+  /**
+   * 0025 世界 Boss：只有 GET /game/sync（getSectState）会算这一个布尔值（两条走索引的小查询），
+   * 其他接口一律不给（默认 false）。前端据此在「讨伐」按钮上显示角标。
+   */
+  worldBossAttackable?: boolean;
 }
 
 export function buildSectStateView(input: SectStateInput): SectStateView {
@@ -1139,12 +1581,15 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
   );
   const libraryLevel = buildingLevels[SCRIPTURE_LIBRARY_BUILDING_ID] ?? 0;
   const awayIds = journeyAwayIds(journeys, now);
-  const rateDisciples = disciples.filter((disciple) => !awayIds.has(disciple.id));
+  // 二期阶段一：重伤卧床期间不产出、不修炼 —— 与在外历练同一口径（速率按 0 显示）。
+  const isUnavailable = (disciple: (typeof disciples)[number]): boolean =>
+    awayIds.has(disciple.id) || isSeverelyInjured(disciple.severe_injured_until, now);
+  const rateDisciples = disciples.filter((disciple) => !isUnavailable(disciple));
   const resourceRatesNow = resourceRates(config, rateDisciples.map(toDiscipleState), buildingLevels);
   const ratesByDisciple = new Map(
     disciples.map((disciple) => [
       disciple.id,
-      awayIds.has(disciple.id)
+      isUnavailable(disciple)
         ? 0
         : cultivationRatePerHour(config, toDiscipleState(disciple), libraryLevel),
     ]),
@@ -1206,6 +1651,7 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
     const away = journeyView.status === 'active';
 
     let blockedReason: string | null = null;
+    let blockedOnlyByEnergy = false;
     if (away) {
       // 在外期间不能破境（服务端也会拒绝），原因优先于修为/灵气。
       blockedReason = '正在外历练，尚未归队';
@@ -1217,6 +1663,7 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
       blockedReason = `修为不足（需要 ${String(stage.requiredCultivation)}）`;
     } else if (energyBalance < cost) {
       blockedReason = `${energyName}不足（需要 ${String(cost)}）`;
+      blockedOnlyByEnergy = true;
     }
 
     // 淬体丹预览：服务端算好短板与提升量，前端不复制算法；次数用完视为无短板。
@@ -1229,6 +1676,19 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
             Number(disciple.speed),
           )
         : null;
+
+    // 0028 装备：战斗属性 = 基础属性 + 装备加成（加成后可以超过 100；基础属性本身仍最高 100）。
+    const gear = gearBonusOfDisciple(disciple);
+    const battleAttrs = withGear(
+      {
+        attack: Number(disciple.attack),
+        defense: Number(disciple.defense),
+        speed: Number(disciple.speed),
+        luck: Number(disciple.luck),
+        physique: Number(disciple.physique),
+      },
+      gear,
+    );
 
     return {
       id: disciple.id,
@@ -1245,11 +1705,14 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
       combatPower: discipleCombatPower(
         disciple.realm_id,
         Number(disciple.stage),
-        Number(disciple.attack),
-        Number(disciple.defense),
-        Number(disciple.speed),
+        battleAttrs.attack,
+        battleAttrs.defense,
+        battleAttrs.speed,
         disciple.talent,
+        gearPowerBonusBpOfDisciple(disciple),
       ),
+      gear,
+      gearPowerBonusBp: gearPowerBonusBpOfDisciple(disciple),
       // 六项属性等权现算：与招贤卡共用 names.ts 的同一个纯函数（服务端唯一评分口径）。
       attributeScore: attributeScore({
         aptitude: Number(disciple.aptitude),
@@ -1271,7 +1734,12 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
       assignment: disciple.assignment,
       assignmentName: assignmentNames.get(disciple.assignment) ?? disciple.assignment,
       injuredUntil: disciple.injured_until === null ? null : new Date(disciple.injured_until).toISOString(),
+      severeInjuredUntil:
+        disciple.severe_injured_until === null
+          ? null
+          : new Date(disciple.severe_injured_until).toISOString(),
       canBreakthrough: blockedReason === null,
+      breakthroughReadyExceptEnergy: blockedReason === null || blockedOnlyByEnergy,
       blockedReason,
       breakthroughCost: String(cost),
       breakthroughChanceBp: chanceBp,
@@ -1279,6 +1747,16 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
       bodyTemperingRemaining: Math.max(0, BODY_TEMPERING_MAX_USES - temperingUses),
       bodyTemperingTarget: temperingTarget?.attribute ?? null,
       bodyTemperingGain: temperingTarget?.gain ?? 0,
+      cultivationPillsToFull: cultivationPillsToFull(
+        Number(disciple.cultivation),
+        stage.requiredCultivation,
+      ),
+      bodyTemperingPlan: bodyTemperingPlan(
+        Number(disciple.attack),
+        Number(disciple.defense),
+        Number(disciple.speed),
+        temperingUses,
+      ),
       /** 0019 悟道值：可用余额 / 累计已分配 / 剩余可分配额度（服务端算好，前端不复制规则）。 */
       daoInsight: Number(disciple.dao_insight) || 0,
       daoInsightUsed: Number(disciple.dao_insight_used) || 0,
@@ -1305,7 +1783,20 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
       };
     }
 
-    const cost = upgradeCost(definition.upgradeCostPerLevel, building.level);
+    // 装备二期：炼器坊走分档表（宗门等级门槛 + 玄铁）。
+    const workshopStep = building.def_id === FORGE_WORKSHOP_ID ? forgeWorkshopUpgradeFrom(building.level) : null;
+    const cost = workshopStep !== null ? { ...workshopStep.cost } : upgradeCost(definition.upgradeCostPerLevel, building.level);
+    if (workshopStep !== null && Number(sect.level) < workshopStep.sectLevel) {
+      return {
+        defId: building.def_id,
+        name: definition.name,
+        level: building.level,
+        maxLevel,
+        upgradeCost: cost,
+        canUpgrade: false,
+        blockedReason: `需要宗门 ${String(workshopStep.sectLevel)} 级`,
+      };
+    }
     const lacking = Object.entries(cost).find(
       ([resourceId, amount]) => (balancesByResource.get(resourceId) ?? 0) < Number(amount),
     );
@@ -1360,6 +1851,7 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
   const alchemyView: AlchemyView = {
     unlocked: alchemyLockedReason === null,
     cultivationPillGain: CULTIVATION_PILL_GAIN,
+    maxCraftQuantity: MAX_CRAFT_QUANTITY,
     blockedReason: alchemyLockedReason,
     recipes: PILL_RECIPES.map((recipe) => {
       const ownedRow = pillInventories.find((row) => row.pill_id === recipe.id);
@@ -1470,15 +1962,10 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
     assignments: [
       { id: IDLE_ASSIGNMENT, name: '闲置', currentCount: null, maxCount: null },
       ...config.positions.map((position) => {
-        if (position.id === STONE_MINING_ASSIGNMENT) {
-          // 采灵岗位有人数上限：宗门 6 级前 1 人、6 级起 2 人（与 service 的派工判定同一套常量）。
-          const limit =
-            Number(sect.level) >= STONE_MINING_UNLOCK_SECT_LEVEL
-              ? STONE_MINING_LIMIT_HIGH
-              : STONE_MINING_LIMIT_LOW;
-          const count = disciples.filter(
-            (disciple) => disciple.assignment === STONE_MINING_ASSIGNMENT,
-          ).length;
+        // 有人数上限的岗位（采灵 / 吐纳）：与 service 的派工判定共用 assignmentLimitOf。
+        const limit = assignmentLimitOf(position.id, Number(sect.level));
+        if (limit !== null) {
+          const count = disciples.filter((disciple) => disciple.assignment === position.id).length;
           return { id: position.id, name: position.name, currentCount: count, maxCount: limit };
         }
         return { id: position.id, name: position.name, currentCount: null, maxCount: null };
@@ -1495,6 +1982,7 @@ export function buildSectStateView(input: SectStateInput): SectStateView {
     alchemy: alchemyView,
     journey: journeySlot,
     activeExploration: input.activeExploration ?? null,
+    worldBoss: { attackable: input.worldBossAttackable ?? false },
     challenge: {
       dailyLimit: CHALLENGE_DAILY_LIMIT,
       usedToday: challengeDay.usedToday,

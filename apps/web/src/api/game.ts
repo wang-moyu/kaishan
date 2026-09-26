@@ -48,7 +48,11 @@ export interface DiscipleView {
   assignment: string;
   assignmentName: string;
   injuredUntil: string | null;
+  /** 重伤卧床（世界 Boss 造成，1 天）：ISO 字符串，格式与 injuredUntil 相同；null = 未重伤。 */
+  severeInjuredUntil: string | null;
   canBreakthrough: boolean;
+  /** 除灵气外的破境条件都已满足（批量破境按这个挑人，灵气整批合计后再判断）。 */
+  breakthroughReadyExceptEnergy: boolean;
   blockedReason: string | null;
   breakthroughCost: string;
   breakthroughChanceBp: number;
@@ -64,6 +68,19 @@ export interface DiscipleView {
   /** 当前战力（服务端按 realms.ts 公式算好）。 */
   combatPower: number;
   /**
+   * 0028 装备加成（该弟子已穿装备的 5 项属性之和；没有装备时全 0）。
+   * 战力已经计入这份加成，前端不要自己再加；上面的 attack/defense/… 仍是**基础属性**（最高 100）。
+   */
+  gear: {
+    attack: number;
+    defense: number;
+    speed: number;
+    luck: number;
+    physique: number;
+  };
+  /** 0032 装备战力加成（基点，10000 = +100%）：身上装备按品质相加；战力已计入，前端只展示。 */
+  gearPowerBonusBp: number;
+  /**
    * 0016 综合评分：**当前**六项属性等权现算，固定一位小数（服务端 names.ts 的
    * attributeScore）。不是战力：境界、修为、天赋都不参与；服务端不落库，
    * 淬体丹改完攻/防/速之后随下一次 sync 自动更新。
@@ -74,6 +91,10 @@ export interface DiscipleView {
   bodyTemperingRemaining: number;
   bodyTemperingTarget: 'attack' | 'defense' | 'speed' | null;
   bodyTemperingGain: number;
+  /** 聚气丹「服到满」（修为达到突破门槛）需要几颗；0 = 不可服用。 */
+  cultivationPillsToFull: number;
+  /** 淬体丹「服到满」的逐颗计划（服务端算好）；长度即需要几颗，空 = 不可服用。 */
+  bodyTemperingPlan: { attribute: 'attack' | 'defense' | 'speed'; gain: number }[];
   /** 0013 掌门私有备注（单行纯文本，≤60 字；空串 = 未填写）。只在自己的 sync 状态里有值。 */
   note: string;
   /** 0017 头像框样式 id（白名单，见 utils/avatarFrames.ts）：旧、新弟子默认 `classic`。 */
@@ -206,6 +227,8 @@ export interface SectStateView {
   journey: JourneyView;
   /** V6 进行中的交互式秘境探索；null = 当前没有（刷新后据此恢复断点）。 */
   activeExploration: ActiveExplorationView | null;
+  /** 0025 世界 Boss（讨伐）：是否可出手（按钮角标；只有 sync 会给真值）。 */
+  worldBoss: { attackable: boolean };
   /**
    * 坊市面板：材料买卖价 + 可回收的丹药（价格单位都是最小单位灵石，前端只展示、不复算规则）。
    * 买入价 / 卖出价按「1 展示单位材料」计价，买入会被服务端再按材料容量上限挡一次。
@@ -241,6 +264,8 @@ export interface AlchemyView {
   recipes: AlchemyRecipeView[];
   /** 聚气丹单次修为增益（服务端下发，前端只渲染，不复制丹药常量）。 */
   cultivationPillGain: number;
+  /** 单次炼制的数量上限（服务端下发）。 */
+  maxCraftQuantity: number;
 }
 
 export interface BreakthroughOutcome {
@@ -264,8 +289,12 @@ export interface CraftPillOutcome {
 /** 服用效果（与后端 service.ts 的 UsePillOutcome['effect'] 一一对应）。 */
 export interface PillUseEffect {
   kind: 'heal' | 'cultivation' | 'bodyTempering';
+  /** 总提升量。 */
   gain?: number;
+  /** 淬体丹第一颗补的属性。 */
   attribute?: 'attack' | 'defense' | 'speed';
+  /** 淬体丹各属性的累计提升量（连服时可能补到不止一项）。 */
+  gains?: Partial<Record<'attack' | 'defense' | 'speed', number>>;
 }
 
 /** 服用结果（与后端 service.ts 的 UsePillOutcome 一一对应）。 */
@@ -274,6 +303,8 @@ export interface UsePillOutcome {
   pillName: string;
   discipleId: string;
   discipleName: string;
+  /** 实际服用颗数（服务端按「服到满所需」与库存截断）。 */
+  count: number;
   effect: PillUseEffect;
 }
 
@@ -330,6 +361,17 @@ export async function logout(): Promise<void> {
   setCsrfToken(null);
 }
 
+/** 修改密码：成功后本账号其他设备的会话全部失效，当前会话保留（revokedSessions = 下线的设备数）。 */
+export async function changePassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<{ revokedSessions: number }> {
+  return apiRequest<{ changed: boolean; revokedSessions: number }>('/api/v1/auth/change-password', {
+    method: 'POST',
+    body: { oldPassword, newPassword },
+  });
+}
+
 export async function syncSect(): Promise<SectStateView | null> {
   const data = await apiRequest<{ state: SectStateView | null }>('/api/v1/game/sync');
   return data.state;
@@ -374,6 +416,67 @@ export async function breakthrough(discipleId: string): Promise<GameActionData> 
   });
 }
 
+/** 批量命令里被跳过的弟子（与后端 service.ts 的 BatchSkippedDisciple 一一对应）。 */
+export interface BatchSkippedDisciple {
+  discipleId: string;
+  discipleName: string;
+  reason: string;
+}
+
+/** 批量换岗结果（POST /game/assign-batch 的 outcome）。 */
+export interface AssignBatchOutcome {
+  assignment: string;
+  assignmentName: string;
+  assigned: { discipleId: string; discipleName: string }[];
+  skipped: BatchSkippedDisciple[];
+}
+
+/** 批量破境结果（POST /game/breakthrough-batch 的 outcome）。 */
+export interface BreakthroughBatchOutcome {
+  results: BreakthroughOutcome[];
+  skipped: BatchSkippedDisciple[];
+  /** 本次共消耗的灵气（最小单位）。 */
+  energySpent: string;
+}
+
+/** 批量疗伤结果（POST /game/heal-batch 的 outcome）。 */
+export interface HealBatchOutcome {
+  healed: { discipleId: string; discipleName: string }[];
+  skipped: BatchSkippedDisciple[];
+  pillsUsed: number;
+}
+
+/** 批量换岗：按数组顺序逐个转，不符合条件的由服务端跳过并列出原因。 */
+export async function assignBatch(
+  discipleIds: string[],
+  assignment: string,
+): Promise<{ state: SectStateView; outcome: AssignBatchOutcome }> {
+  return apiRequest<{ state: SectStateView; outcome: AssignBatchOutcome }>('/api/v1/game/assign-batch', {
+    method: 'POST',
+    body: { discipleIds, assignment },
+  });
+}
+
+/** 批量破境：不满足条件的跳过；灵气须够全部可破境弟子，否则整批拒绝。 */
+export async function breakthroughBatch(
+  discipleIds: string[],
+): Promise<{ state: SectStateView; outcome: BreakthroughBatchOutcome }> {
+  return apiRequest<{ state: SectStateView; outcome: BreakthroughBatchOutcome }>(
+    '/api/v1/game/breakthrough-batch',
+    { method: 'POST', body: { discipleIds } },
+  );
+}
+
+/** 批量疗伤（回春丹一人一颗）：无伤 / 重伤 / 在外的跳过；库存须够全部伤员，否则整批拒绝。 */
+export async function healBatch(
+  discipleIds: string[],
+): Promise<{ state: SectStateView; outcome: HealBatchOutcome }> {
+  return apiRequest<{ state: SectStateView; outcome: HealBatchOutcome }>('/api/v1/game/heal-batch', {
+    method: 'POST',
+    body: { discipleIds },
+  });
+}
+
 /** 事件历史（GET /game/events，最近 20 条）。 */
 export async function fetchEventLog(): Promise<EventLogView[]> {
   const data = await apiRequest<{ events: EventLogView[] }>('/api/v1/game/events');
@@ -396,6 +499,8 @@ export interface SecretRealmView {
   difficulty: number;
   entryCost: Record<string, string>;
   rewards: Record<string, string>;
+  /** 成功时的概率掉落说明（如「玄铁 1~2（15%）」）；没有则为 null。 */
+  bonusDropText: string | null;
   minParty: number;
   maxParty: number;
   dailyLimit: number | null;
@@ -610,16 +715,73 @@ export interface DiscipleLeaderboardEntryView {
   attributeScore: number;
   talent: string;
   talentName: string;
+  /** 0032 装备战力加成（基点）；没穿装备为 0。 */
+  gearPowerBonusBp: number;
+  /** 装备榜才有：三个部位各穿了什么品质（没穿的部位 quality 为 null）。 */
+  gearSlots?: DiscipleLeaderboardGearSlotView[];
   isMe: boolean;
+}
+
+export interface DiscipleLeaderboardGearSlotView {
+  slot: string;
+  slotName: string;
+  quality: string | null;
+  qualityName: string | null;
+  color: string | null;
 }
 
 export interface DiscipleLeaderboardView {
   byCombatPower: DiscipleLeaderboardEntryView[];
   byAttributeScore: DiscipleLeaderboardEntryView[];
+  /** 0032 装备榜：没穿装备的不上榜。 */
+  byEquipment: DiscipleLeaderboardEntryView[];
 }
 
 export async function fetchDiscipleLeaderboard(): Promise<DiscipleLeaderboardView> {
   return apiRequest<DiscipleLeaderboardView>('/api/v1/game/disciple-leaderboard');
+}
+
+/** 天骄榜点开的弟子公开档案（任何登录玩家可看；不含掌门备注等私有字段）。 */
+export interface DiscipleProfileView {
+  discipleId: string;
+  name: string;
+  gender: string;
+  realmId: string;
+  frameId: string;
+  sectId: string;
+  sectName: string;
+  /** 是不是观看者自己宗门的弟子。 */
+  isMe: boolean;
+  realmName: string;
+  stageName: string;
+  talent: string;
+  talentName: string;
+  talentDescription: string;
+  /** 基础属性（最高 100，不含装备）。 */
+  aptitude: number;
+  attack: number;
+  defense: number;
+  speed: number;
+  luck: number;
+  physique: number;
+  /** 装备加成（已穿装备 5 项之和）。 */
+  gear: { attack: number; defense: number; speed: number; luck: number; physique: number };
+  /** 战力（计入装备，与天骄榜同口径）。 */
+  combatPower: number;
+  /** 综合评分（六项基础属性等权，不计装备）。 */
+  attributeScore: number;
+  bodyTemperingUses: number;
+  daoInsightUsed: number;
+  /** 当前伤势：severe = 重伤卧床，injured = 负伤，null = 无。 */
+  injury: 'severe' | 'injured' | null;
+  /** 已穿戴的装备（按部位排序）。 */
+  equipment: EquipmentItemView[];
+}
+
+export async function fetchDiscipleProfile(discipleId: string): Promise<DiscipleProfileView> {
+  return apiRequest<DiscipleProfileView>(
+    `/api/v1/game/disciple-profile/${encodeURIComponent(discipleId)}`,
+  );
 }
 
 export interface ChatMessageView {
@@ -753,14 +915,17 @@ export async function craftPill(pillId: string, quantity: number): Promise<{
   });
 }
 
-/** 服用丹药（POST /game/use-pill）：目标弟子必须属于当前宗门，返回写库后的完整状态与服用效果。 */
-export async function usePill(pillId: string, discipleId: string): Promise<{
+/**
+ * 服用丹药（POST /game/use-pill）：目标弟子必须属于当前宗门，返回写库后的完整状态与服用效果。
+ * count = 想服几颗（「服到满」传所需颗数）；服务端会按所需与库存截断，实际颗数见 outcome.count。
+ */
+export async function usePill(pillId: string, discipleId: string, count = 1): Promise<{
   state: SectStateView;
   outcome: UsePillOutcome;
 }> {
   return apiRequest<{ state: SectStateView; outcome: UsePillOutcome }>('/api/v1/game/use-pill', {
     method: 'POST',
-    body: { pillId, discipleId },
+    body: { pillId, discipleId, count },
   });
 }
 
@@ -1426,5 +1591,404 @@ export async function shopSellPill(
   return apiRequest<{ state: SectStateView; result: ShopSellPillResult }>(
     '/api/v1/game/shop-sell-pill',
     { method: 'POST', body: { pillId, quantity } },
+  );
+}
+
+/* ---------- 0025/0027 世界 Boss（讨伐，二期） ---------- */
+
+export interface WorldBossDefView {
+  index: number;
+  name: string;
+  /** 带关卡的显示名（如「第 2 关 · 赤炎火蛟」）。 */
+  displayName: string;
+  sealCharacter: string;
+  color: string;
+  description: string;
+}
+
+/** 词缀推荐排序属性（与 DisciplePicker 的 extraSort 同一个联合类型）。 */
+export type WorldBossSortAttribute = 'attack' | 'defense' | 'speed' | 'luck' | 'physique';
+
+/** 本关随机词缀。 */
+export interface WorldBossAffixView {
+  id: string;
+  name: string;
+  /** 效果文案（一行，保持简短）。 */
+  effect: string;
+  /** 配队提示。 */
+  tip: string;
+  /** 推荐排序属性（追加到选人组件的排序按钮里）。 */
+  sortAttribute: WorldBossSortAttribute;
+}
+
+export interface WorldBossRankView {
+  sectId: string;
+  sectName: string;
+  damage: number;
+  attempts: number;
+  isTopDamage: boolean;
+  isLastHit: boolean;
+  isMe: boolean;
+}
+
+export interface WorldBossHitView {
+  sectId: string;
+  sectName: string;
+  discipleNames: string[];
+  /** 本次受伤（普通受伤，30 分钟）的弟子名。 */
+  injuredNames: string[];
+  /** 本次被打成重伤（静养 1 天）的弟子名。 */
+  severeNames: string[];
+  damage: number;
+  isCrit: boolean;
+  isLastHit: boolean;
+  createdAt: number;
+}
+
+/** 未出现 / 讨伐中 / 力竭中 / 已结束（UTC+8 时间段）。 */
+export type WorldBossPhase = 'before' | 'open' | 'frenzy' | 'closed';
+
+export interface WorldBossCurrentView {
+  id: string;
+  dayKey: string;
+  /** 第几关（每天从 1 开始，连战递增）。 */
+  stage: number;
+  def: WorldBossDefView;
+  affix: WorldBossAffixView;
+  maxHp: number;
+  hp: number;
+  status: 'active' | 'killed' | 'fled';
+  phase: WorldBossPhase;
+  killerSectName: string | null;
+  fledOutcome: 'repelled' | 'escaped' | null;
+  endedAt: number | null;
+}
+
+/** 一次出手里某名弟子的判定结果。 */
+export interface WorldBossMemberOutcomeView {
+  discipleId: string;
+  discipleName: string;
+  outcome: 'normal' | 'injured' | 'severe';
+}
+
+export interface WorldBossView {
+  boss: WorldBossCurrentView | null;
+  phase: WorldBossPhase;
+  /** 今天的出现时间（毫秒），未出现时用于「08:00 降临」提示。 */
+  opensAt: number;
+  remainingSeconds: number;
+  /** 今日已连斩 N 只。 */
+  killedToday: number;
+  /** 史上最高「一天连斩 M 只」。 */
+  bestStage: number;
+  /** 出手冷却剩余秒数（0 = 可以出手）。 */
+  cooldownSeconds: number;
+  /** 本宗门弟子疲劳表：弟子 id → 最近 60 分钟的出战次数。 */
+  fatigue: Record<string, number>;
+  /** 最近 60 分钟内每次出战讨伐的时间（毫秒，升序），用于「冒进冷却」倒计时。 */
+  fatigueTimes: Record<string, number[]>;
+  /** 此刻能否出手：Boss 在讨伐中 + 开放时段 + 今日出手次数没用满。 */
+  attackable: boolean;
+  /** 本宗门今天已出手次数。 */
+  attacksToday: number;
+  /** 每日出手上限（0 = 不限；由服务端配置）。 */
+  dailyAttackLimit: number;
+  ranks: WorldBossRankView[];
+  hits: WorldBossHitView[];
+  topHit: WorldBossHitView | null;
+  /**
+   * 奖励预览：当前关卡、按本宗门此刻产出算的各名次奖励；rank 4 = 第 4 名及以后；资源为最小单位。
+   * dropDescription 是 0028 的装备掉落说明（服务端拼好，前端直接渲染）。
+   */
+  rewardPreview: {
+    stage: number;
+    tiers: { rank: number; multiplier: number; resources: Record<string, number>; topDamagePill: boolean }[];
+    lastHitStone: number;
+    dropDescription: string;
+    /** 三期：本关伤害占比 100% 时的功勋（展示单位）；实际按 √占比 折算，保底 2。 */
+    meritFullShare: number;
+    /** 本关击杀的玄铁：伤害占比 ≥ minSharePercent% 才有，第 1 名拿 top；below = 不足门槛时的数量。 */
+    xuantie: { top: number; others: number; below: number; minSharePercent: number };
+  } | null;
+  /**
+   * 三期：本宗门在当前关的掉落概率（boss 为 null 时为 null）。
+   * 伤害占比与概率都由服务端算好（高档 = 75% × √占比），前端只渲染，不复制公式。
+   */
+  myDrop: {
+    /** 本宗门对本关的伤害占比（0~1；还没出手为 0）。 */
+    damageShare: number;
+    /** 击杀时掉高档装备的概率（0~1）。 */
+    highChance: number;
+    /** 高档品质名（第 1～2 关灵品、第 3～4 关宝品、第 5 关起仙品）。 */
+    highQualityName: string;
+    /** 低档品质名。 */
+    lowQualityName: string;
+  } | null;
+}
+
+export interface WorldBossAttackResultView {
+  damage: number;
+  actualDamage: number;
+  crit: boolean;
+  frenzy: boolean;
+  lastHit: boolean;
+  bossHp: number;
+  bossMaxHp: number;
+  /** 击杀后立刻开出的下一关关卡号；没击杀为 null。 */
+  nextStage: number | null;
+  /** 本次每名弟子的判定结果（正常 / 受伤 / 重伤）。 */
+  members: WorldBossMemberOutcomeView[];
+}
+
+export async function fetchWorldBoss(): Promise<{ state: SectStateView; boss: WorldBossView }> {
+  return apiRequest<{ state: SectStateView; boss: WorldBossView }>('/api/v1/game/world-boss');
+}
+
+export async function attackWorldBoss(discipleIds: string[]): Promise<{
+  state: SectStateView;
+  result: WorldBossAttackResultView;
+  boss: WorldBossView;
+}> {
+  return apiRequest<{
+    state: SectStateView;
+    result: WorldBossAttackResultView;
+    boss: WorldBossView;
+  }>('/api/v1/game/world-boss/attack', { method: 'POST', body: { discipleIds } });
+}
+
+/**
+ * 三期功勋兑换入参（与后端 worldBossExchangeRequestSchema 一一对应；多余字段会被服务端 400 拒绝）。
+ * 部位 / 主属性的组合合法性（法器必须选身法 / 幸运等）由服务端校验。
+ */
+/** 功勋兑换（GET /game/merit-shop）：分类（标签页）、价目、可选部位都由服务端给。 */
+export interface MeritShopView {
+  categories: { id: string; name: string }[];
+  items: {
+    id: string;
+    name: string;
+    /** 价格（功勋，展示单位）。 */
+    cost: number;
+    category: string;
+    /** 装备类的品质与品质色；资源类为 null。 */
+    quality: string | null;
+    color: string | null;
+  }[];
+  slots: EquipmentSlotView[];
+  /** 资源类一次最多兑换几个。 */
+  maxResourceQuantity: number;
+}
+
+export async function fetchMeritShop(): Promise<MeritShopView> {
+  const data = await apiRequest<{ shop: MeritShopView }>('/api/v1/game/merit-shop');
+  return data.shop;
+}
+
+export interface BossMeritExchangeInput {
+  /** xuantie（玄铁）| spirit（灵品）| treasure（宝品）| immortal（仙品）。 */
+  itemId: string;
+  /** 换玄铁时的个数（1~100）；换装备只能缺省或 1。 */
+  quantity?: number;
+  /** 换装备时的部位（weapon / armor / artifact）；换玄铁不许带。 */
+  slot?: string;
+  /** 法器必须带（speed / luck）；其它部位不许带。 */
+  mainAttr?: string;
+}
+
+/** 功勋兑换回执（POST /game/world-boss/exchange 的 outcome，与后端 service.ts 的 BossMeritExchangeOutcome 一一对应）。 */
+export interface BossMeritExchangeOutcome {
+  itemId: string;
+  /** 花掉的功勋（最小单位）。 */
+  cost: number;
+  /** 兑换到的玄铁（最小单位）；兑换装备时为 0。 */
+  xuantie: number;
+  /** 兑换到的装备；兑换玄铁时为 null。 */
+  equipment: { id: string; name: string; quality: string; slot: string; slotName: string } | null;
+}
+
+/**
+ * 三期功勋兑换（POST /game/world-boss/exchange）：价格、余额、背包与部位都最终由服务端裁决，
+ * 必定成功、不需要炼器坊；成功返回写库后的完整状态与兑换回执。
+ */
+export async function exchangeBossMerit(
+  input: BossMeritExchangeInput,
+): Promise<{ state: SectStateView; outcome: BossMeritExchangeOutcome }> {
+  return apiRequest<{ state: SectStateView; outcome: BossMeritExchangeOutcome }>(
+    '/api/v1/game/world-boss/exchange',
+    { method: 'POST', body: input },
+  );
+}
+
+/* ---------- 0028 装备（炼器 / 背包 / 穿戴 / 分解） ---------- */
+
+/** 装备部位（与后端 equipment.ts 的 EQUIPMENT_SLOTS 同口径）。 */
+export type EquipmentSlotId = 'weapon' | 'armor' | 'artifact';
+
+/** 法器可选的主属性（只有法器需要玩家选，其余部位由服务端按规则固定）。 */
+export type EquipmentMainAttr = 'speed' | 'luck';
+
+/**
+ * 单件装备视图（背包卡片与弟子装备格共用）。
+ * 品质名 / 颜色、部位名与属性名都由服务端下发，前端只渲染，不复制一份规则表。
+ */
+export interface EquipmentItemView {
+  id: string;
+  /** weapon | armor | artifact。 */
+  slot: EquipmentSlotId;
+  slotName: string;
+  /** common | spirit | treasure | immortal。 */
+  quality: string;
+  qualityName: string;
+  /** 品质色（卡片边框用），如 `#fbbf24`。 */
+  color: string;
+  /** `{品质名}·{部位名}`，如「仙品·紫金葫芦」。 */
+  name: string;
+  mainAttr: string;
+  mainAttrName: string;
+  mainValue: number;
+  subAttr: string;
+  subAttrName: string;
+  subValue: number;
+  source: 'forge' | 'boss';
+  /** 0032 穿在身上时给弟子的战力加成（基点，按品质）。 */
+  powerBonusBp: number;
+  /** 穿在谁身上；null = 在背包里（背包 = 本宗未穿戴的装备）。 */
+  discipleId: string | null;
+  discipleName: string | null;
+  createdAt: string;
+}
+
+/** 一个可炼部位；法器的 mainAttrChoices 非空（玩家必须选身法或幸运）。 */
+export interface EquipmentSlotView {
+  id: EquipmentSlotId;
+  name: string;
+  mainAttrChoices: { id: string; name: string }[];
+}
+
+/**
+ * 装备面板视图（GET /game/equipment）。
+ * 解锁判断、背包计数、炼器价格、可选部位与主属性候选、分解返还都由服务端算好。
+ */
+export interface EquipmentView {
+  unlocked: boolean;
+  blockedReason: string | null;
+  /** 背包已用件数（穿在身上的不占背包）。 */
+  bagCount: number;
+  bagCapacity: number;
+  /** 单次炼器消耗（最小单位）。 */
+  forgeCost: Record<string, string>;
+  /** 一期只能炼的品质（凡品）。 */
+  forgeQuality: string;
+  forgeQualityName: string;
+  /** 装备二期：炼器坊等级（决定可炼的最高品质）。 */
+  workshopLevel: number;
+  /** 装备二期：各品质炼造选项（消耗为最小单位；unlocked = 炼器坊等级已够）。 */
+  forgeOptions: {
+    quality: string;
+    name: string;
+    color: string;
+    workshopLevel: number;
+    unlocked: boolean;
+    cost: Record<string, string>;
+    /** 成功 / 降级 / 失败概率（0~1）。 */
+    odds: { success: number; downgrade: number; fail: number };
+  }[];
+  slots: EquipmentSlotView[];
+  /** 品质 id → 分解返还的矿石（**展示单位**，直接显示数字即可）。 */
+  salvageOre: Record<string, number>;
+  /** 本宗全部装备（背包 + 已穿戴），新的在前。 */
+  items: EquipmentItemView[];
+}
+
+/** 炼器回执（POST /game/forge-equipment 的 outcome）。 */
+export interface ForgeEquipmentOutcome {
+  /** success = 所选品质；downgrade = 低一档；fail = 没出装备（refund 为返还的灵石 / 矿石）。 */
+  result: 'success' | 'downgrade' | 'fail';
+  equipmentId: string | null;
+  name: string | null;
+  slot: string;
+  slotName: string;
+  quality: string | null;
+  refund: Record<string, number>;
+  cost: Record<string, string>;
+}
+
+/** 穿戴 / 卸下回执（POST /game/equip、/game/unequip 的 outcome）。 */
+export interface EquipChangeOutcome {
+  equipmentId: string;
+  name: string;
+  slot: EquipmentSlotId;
+  slotName: string;
+  /** 现在穿在谁身上；卸下后为 null（已回背包）。 */
+  discipleId: string | null;
+  discipleName: string | null;
+  /** 换装时被顶替回背包的那件装备名；没有为 null。 */
+  replacedName: string | null;
+}
+
+/** 分解回执（POST /game/salvage-equipment 的 outcome）。 */
+export interface SalvageEquipmentOutcome {
+  /** 实际分解的件数（已去重）。 */
+  count: number;
+  /** 返还的矿石（**最小单位**，用 formatAmount 显示）。 */
+  ore: number;
+  /** 装备二期：返还的玄铁（最小单位）。 */
+  xuantie: number;
+}
+
+/** 0028 读取装备面板（GET /game/equipment）：只读，不结算；装备明细不放进 /game/sync。 */
+export async function fetchEquipment(): Promise<{
+  state: SectStateView;
+  equipment: EquipmentView;
+}> {
+  return apiRequest<{ state: SectStateView; equipment: EquipmentView }>('/api/v1/game/equipment');
+}
+
+/** 0028 炼器（POST /game/forge-equipment）：法器必须给 mainAttr（speed / luck），其他部位不能给。 */
+export async function forgeEquipment(
+  slot: EquipmentSlotId,
+  mainAttr?: EquipmentMainAttr,
+  quality?: string,
+): Promise<{ state: SectStateView; outcome: ForgeEquipmentOutcome }> {
+  return apiRequest<{ state: SectStateView; outcome: ForgeEquipmentOutcome }>(
+    '/api/v1/game/forge-equipment',
+    {
+      method: 'POST',
+      body: {
+        slot,
+        ...(mainAttr === undefined ? {} : { mainAttr }),
+        ...(quality === undefined ? {} : { quality }),
+      },
+    },
+  );
+}
+
+/** 0028 穿戴（POST /game/equip）：目标弟子与装备归属、在外 / 重伤都由服务端校验。 */
+export async function equipItem(
+  equipmentId: string,
+  discipleId: string,
+): Promise<{ state: SectStateView; outcome: EquipChangeOutcome }> {
+  return apiRequest<{ state: SectStateView; outcome: EquipChangeOutcome }>('/api/v1/game/equip', {
+    method: 'POST',
+    body: { equipmentId, discipleId },
+  });
+}
+
+/** 0028 卸下（POST /game/unequip）：装备回背包；背包满时服务端会拒绝。 */
+export async function unequipItem(
+  equipmentId: string,
+): Promise<{ state: SectStateView; outcome: EquipChangeOutcome }> {
+  return apiRequest<{ state: SectStateView; outcome: EquipChangeOutcome }>(
+    '/api/v1/game/unequip',
+    { method: 'POST', body: { equipmentId } },
+  );
+}
+
+/** 0028 分解（POST /game/salvage-equipment）：1~50 件（重复 id 由服务端去重），只能分解背包里的。 */
+export async function salvageEquipment(
+  equipmentIds: string[],
+): Promise<{ state: SectStateView; outcome: SalvageEquipmentOutcome }> {
+  return apiRequest<{ state: SectStateView; outcome: SalvageEquipmentOutcome }>(
+    '/api/v1/game/salvage-equipment',
+    { method: 'POST', body: { equipmentIds } },
   );
 }

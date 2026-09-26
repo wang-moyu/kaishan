@@ -15,9 +15,9 @@ ON CONFLICT (code) DO NOTHING;
 
 INSERT INTO config_versions (id, version, payload_hash, created_at)
 VALUES (
-  'cfg-v5.1.0',
-  'v5.1.0',
-  'sha256:7cba811dc2e4ad282590c8c98299a82cb22a1ddb46c5f6dc55068b00dee16514',
+  'cfg-v8.0.0',
+  'v8.0.0',
+  'sha256:7c795b90d69375f5f49b6f3d70133e1ef0cc6fd5ac811d30bb0a9cee0fccce64',
   CAST(strftime('%s', 'now') AS INTEGER) * 1000
 )
 ON CONFLICT (version) DO NOTHING;

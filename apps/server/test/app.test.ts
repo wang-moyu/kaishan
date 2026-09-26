@@ -1,6 +1,8 @@
 import { env, SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
+import { GAME_CONFIG_VERSION } from '@xiuxian/game-config';
+
 import { createApp } from '../src/app';
 
 import { createCapturingLogger } from './support/memoryLogger';
@@ -26,7 +28,7 @@ describe('统一响应包（P0-03）', () => {
 
     expect(body.ok).toBe(true);
     expect(body.data.status).toBe('live');
-    expect(body.data.configVersion).toBe('v5.1.0');
+    expect(body.data.configVersion).toBe(GAME_CONFIG_VERSION);
     expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/u);
     expect(new Date(body.serverTime).toISOString()).toBe(body.serverTime);
   });
@@ -64,7 +66,7 @@ describe('统一响应包（P0-03）', () => {
     const okBody = (await ok.json()) as {
       data: { version: string; config: Record<string, unknown> };
     };
-    expect(okBody.data.version).toBe('v5.1.0');
+    expect(okBody.data.version).toBe(GAME_CONFIG_VERSION);
     expect(Object.keys(okBody.data.config).sort()).toEqual([
       'breakthrough',
       'buildings',

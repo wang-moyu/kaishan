@@ -1,3 +1,5 @@
+import { severeInjuryLeftText } from './format';
+
 /**
  * 弟子名册的筛选 / 排序 / 状态派生（纯函数，不碰 DOM、不依赖 Vue）。
  *
@@ -39,6 +41,11 @@ export interface FilterableDisciple {
   attributeScore: number;
   /** null = 未受伤。 */
   injuredUntil: string | null;
+  /**
+   * 重伤卧床截止时间（ISO，世界 Boss 打伤，静养 1 天）：null / 缺字段 = 未重伤。
+   * 这里写成可选，是为了让根级测试的最小结构不必带上它；`DiscipleView` 一定给值。
+   */
+  severeInjuredUntil?: string | null;
   canBreakthrough: boolean;
 }
 
@@ -64,7 +71,13 @@ export interface DiscipleStatus {
   label: string;
 }
 
-export type DiscipleStatusFilter = 'all' | 'canBreakthrough' | 'injured' | 'cultivationFull' | 'idle';
+export type DiscipleStatusFilter =
+  | 'all'
+  | 'canBreakthrough'
+  | 'injured'
+  | 'severeInjured'
+  | 'cultivationFull'
+  | 'idle';
 
 export type DiscipleSortKey =
   | 'recruitOrder'
@@ -104,6 +117,7 @@ export const DISCIPLE_STATUS_FILTERS: readonly { value: DiscipleStatusFilter; la
   { value: 'all', label: '全部' },
   { value: 'canBreakthrough', label: '可破境' },
   { value: 'injured', label: '疗伤' },
+  { value: 'severeInjured', label: '重伤' },
   { value: 'cultivationFull', label: '修为已满' },
   { value: 'idle', label: '闲置' },
 ];
@@ -173,6 +187,28 @@ export function isInjured(disciple: FilterableDisciple, serverNowMs: number): bo
   return until > serverNowMs;
 }
 
+/**
+ * 重伤卧床中：`severeInjuredUntil > serverNow`（缺字段 / 时间戳非法时不算重伤）。
+ * 与服务端 constants.ts 的 `isSeverelyInjured` 同一口径；「现在」只取调用方给的服务器时间。
+ */
+export function isSeverelyInjured(disciple: FilterableDisciple, serverNowMs: number): boolean {
+  const severeInjuredUntil = disciple.severeInjuredUntil ?? null;
+  if (severeInjuredUntil === null) return false;
+  const until = Date.parse(severeInjuredUntil);
+  if (!Number.isFinite(until) || !Number.isFinite(serverNowMs)) return false;
+  return until > serverNowMs;
+}
+
+/**
+ * 重伤状态文案：`重伤 · 剩 2天5时`（剩余时间按调用方给的服务器时间倒算，格式见 utils/format.ts）。
+ * 未重伤返回 null。名册行与详情弹窗共用这一处，免得两边拼出不一样的文案。
+ */
+export function severeInjuryStatusLabel(disciple: FilterableDisciple, serverNowMs: number): string | null {
+  if (!isSeverelyInjured(disciple, serverNowMs)) return null;
+  const until = Date.parse(disciple.severeInjuredUntil ?? '');
+  return `重伤 · 剩 ${severeInjuryLeftText(until, serverNowMs)}`;
+}
+
 
 /** 选人控件需要的字段子集：比 FilterableDisciple 多一个历练状态（判断是否在外）。 */
 export interface SelectableDisciple extends FilterableDisciple {
@@ -190,7 +226,8 @@ export interface SelectionBlockOptions {
 /**
  * 选人控件里「这名弟子为什么不能选」（null = 可选）。
  *
- * 与服务端同一口径：疗伤 = `injuredUntil > serverNow`；在外 = `journey.status === 'active'`
+ * 与服务端同一口径：重伤 = `severeInjuredUntil > serverNow`（一律禁选，不受开关影响）；
+ * 疗伤 = `injuredUntil > serverNow`；在外 = `journey.status === 'active'`
  * （`ready` 是「已归队待领取」，服务端也放行）。挑战 / 守擂 / 秘境 / 赌坊四处共用这一份判定，
  * 免得再出现「前端能选、提交被服务端打回」。
  */
@@ -199,6 +236,8 @@ export function selectionBlockReason(
   serverNowMs: number,
   options: SelectionBlockOptions,
 ): string | null {
+  // 重伤卧床期间服务端一律拒绝（守擂阵容也上不了场），所以不看 blockInjured / blockAway 开关。
+  if (isSeverelyInjured(disciple, serverNowMs)) return '重伤';
   if (options.blockInjured && isInjured(disciple, serverNowMs)) return '疗伤中';
   if (options.blockAway && disciple.journey.status === 'active') return '在外历练';
   return null;
@@ -351,7 +390,7 @@ export function cultivationProgress(
 }
 
 /**
- * 状态筛选：全部 / 可破境 / 疗伤 / 修为已满（含已达当前版本上限）/ 闲置。
+ * 状态筛选：全部 / 可破境 / 疗伤 / 重伤 / 修为已满（含已达当前版本上限）/ 闲置。
  *
  * 「修为已满」刻意排除 `canBreakthrough`：可破境是独立筛选项，且此时行内标签显示「可破境」，
  * 若同时落进「修为已满」会让筛选结果与看到的标签互相矛盾（规格 2.1 的状态语义）。
@@ -367,6 +406,8 @@ export function matchesStatusFilter(
   if (status === 'all') return true;
   if (status === 'canBreakthrough') return disciple.canBreakthrough;
   if (status === 'injured') return isInjured(disciple, serverNowMs);
+  // 重伤与疗伤互不包含：重伤看 severeInjuredUntil，只想知道谁能出战就筛这项。
+  if (status === 'severeInjured') return isSeverelyInjured(disciple, serverNowMs);
   if (status === 'cultivationFull') return !disciple.canBreakthrough && hasFullCultivation(disciple);
   return disciple.assignment === IDLE_ASSIGNMENT_ID;
 }

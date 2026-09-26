@@ -18,6 +18,7 @@
     "build": "npm run build:web && npm run build:server",
     "build:web": "npm run build -w apps/web",
     "build:server": "npm run build -w apps/server",
+    "build:node": "npm run build:web && npm run build:node -w apps/server",
     "typecheck": "npm run typecheck --workspaces --if-present && tsc --noEmit -p tsconfig.json && tsc --noEmit -p scripts/tsconfig.json",
     "test:unit": "vitest run && npm run test:unit -w apps/server",
     "cf:types": "npm run cf:types -w apps/server",

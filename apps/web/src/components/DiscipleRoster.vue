@@ -20,8 +20,10 @@ import {
   discipleStatus,
   filterDisciples,
   isFilterActive,
+  isInjured,
   journeyBadge,
   realmOptions,
+  severeInjuryStatusLabel,
   stageOptions,
 } from '../utils/discipleFilter';
 import DiscipleAvatar from './DiscipleAvatar.vue';
@@ -60,6 +62,14 @@ const emit = defineEmits<{
   openDetail: [discipleId: string];
   /** 点击可破境的头像：只请求打开确认弹窗，不直接破境。 */
   requestBreakthrough: [discipleId: string];
+  /** 多选底栏「批量突破」：只请求打开确认弹窗（按勾选顺序）。 */
+  requestBatchBreakthrough: [discipleIds: string[]];
+  /** 多选底栏「批量换岗」：直接提交，不符合条件的由服务端跳过并说明原因。 */
+  batchAssign: [discipleIds: string[], assignment: string];
+  /** 点「疗伤中」标签：直接服一颗回春丹（库存 / 解锁由上层先判，最终裁决在服务端）。 */
+  quickHeal: [discipleId: string];
+  /** 多选底栏「批量疗伤」：只请求打开确认弹窗（按勾选顺序）。 */
+  requestBatchHeal: [discipleIds: string[]];
 }>();
 
 function loadSavedFilter(): DiscipleFilter {
@@ -82,7 +92,7 @@ const activeMoreCount = computed(() =>
 );
 
 /**
- * 行内状态标签：历练状态优先（在外 / 待领取），其次疗伤，最后当前岗位。
+ * 行内状态标签：历练状态优先（在外 / 待领取），其次重伤 / 疗伤，最后当前岗位。
  * key 直接进 `status-*` / `is-*` 类名，所以历练用 `journey` / `journey-ready` 两个新类。
  */
 interface RosterStatus {
@@ -116,10 +126,13 @@ const rows = computed<RosterRow[]>(() =>
     const status = discipleStatus(disciple, props.serverNowMs);
     const badge = journeyBadge(disciple.journey, props.serverNowMs);
     const journeyReady = disciple.journey.status === 'ready';
-    // 卡片只显示当前状态：疗伤优先，其余统一显示当前岗位。
+    // 卡片只显示当前状态：重伤 > 疗伤 > 当前岗位（卧床期间什么都不产出，要最先被看到）。
     // 可破境由满环与头像按钮表达，不再重复占用状态标签。
-    const rosterStatus: RosterStatus =
-      status.key === 'injured' ? status : { key: 'assignment', label: disciple.assignmentName };
+    let rosterStatus: RosterStatus = { key: 'assignment', label: disciple.assignmentName };
+    if (status.key === 'injured') rosterStatus = status;
+    // 重伤剩余时间按 props.serverNowMs（服务器时间口径）倒算；key 会进 `is-severeInjured` 类名。
+    const severeLabel = severeInjuryStatusLabel(disciple, props.serverNowMs);
+    if (severeLabel !== null) rosterStatus = { key: 'severeInjured', label: severeLabel };
     return {
       disciple,
       status,
@@ -187,6 +200,93 @@ function onSortChange(event: Event): void {
 }
 
 const stageValue = computed(() => (filter.value.stage === null ? '' : String(filter.value.stage)));
+
+/* ---------- 多选：勾选弟子后在底栏批量换岗 / 批量突破 ---------- */
+
+const selecting = ref(false);
+/** 已选弟子 id（保持勾选顺序：批量换岗的采灵名额按这个顺序占）。 */
+const selectedIds = ref<string[]>([]);
+const selectedSet = computed(() => new Set(selectedIds.value));
+
+// 被驱逐等从名单里消失的弟子自动移出选择，底栏人数与实际一致。
+watch(
+  () => props.disciples,
+  (list) => {
+    const alive = new Set(list.map((disciple) => disciple.id));
+    if (selectedIds.value.some((id) => !alive.has(id))) {
+      selectedIds.value = selectedIds.value.filter((id) => alive.has(id));
+    }
+  },
+);
+
+function toggleSelecting(): void {
+  selecting.value = !selecting.value;
+  if (!selecting.value) selectedIds.value = [];
+}
+
+function toggleSelected(discipleId: string): void {
+  selectedIds.value = selectedSet.value.has(discipleId)
+    ? selectedIds.value.filter((id) => id !== discipleId)
+    : [...selectedIds.value, discipleId];
+}
+
+/** 多选模式下点卡片空白处也能勾选；卡片里的按钮（头像破境、详情）照常工作。 */
+function onRowClick(discipleId: string, event: MouseEvent): void {
+  if (!selecting.value) return;
+  if ((event.target as Element).closest('button, a, input, label, select')) return;
+  toggleSelected(discipleId);
+}
+
+const visibleIds = computed(() => rows.value.map((row) => row.disciple.id));
+const allVisibleSelected = computed(
+  () => visibleIds.value.length > 0 && visibleIds.value.every((id) => selectedSet.value.has(id)),
+);
+
+/** 全选当前筛选结果（再点一次取消这些人的勾选；筛选外已勾的保留）。 */
+function toggleSelectVisible(): void {
+  if (allVisibleSelected.value) {
+    const visible = new Set(visibleIds.value);
+    selectedIds.value = selectedIds.value.filter((id) => !visible.has(id));
+    return;
+  }
+  selectedIds.value = [
+    ...selectedIds.value,
+    ...visibleIds.value.filter((id) => !selectedSet.value.has(id)),
+  ];
+}
+
+function clearSelection(): void {
+  selectedIds.value = [];
+}
+
+function onBatchAssignChange(event: Event): void {
+  const select = event.target as HTMLSelectElement;
+  const assignment = select.value;
+  // 下拉框只当「动作菜单」用：选完立即复位，下次还能选同一个岗位。
+  select.value = '';
+  if (assignment === '' || selectedIds.value.length === 0 || props.busy) return;
+  emit('batchAssign', [...selectedIds.value], assignment);
+}
+
+function onBatchBreakthrough(): void {
+  if (selectedIds.value.length === 0 || props.busy) return;
+  emit('requestBatchBreakthrough', [...selectedIds.value]);
+}
+
+/** 勾选的人里有没有回春丹能治的伤员（疗伤中且未重伤）：有才显示「批量疗伤」。 */
+const selectionHasHealable = computed(() =>
+  props.disciples.some(
+    (disciple) =>
+      selectedSet.value.has(disciple.id) &&
+      isInjured(disciple, props.serverNowMs) &&
+      severeInjuryStatusLabel(disciple, props.serverNowMs) === null,
+  ),
+);
+
+function onBatchHeal(): void {
+  if (selectedIds.value.length === 0 || props.busy) return;
+  emit('requestBatchHeal', [...selectedIds.value]);
+}
 
 function ringClass(row: RosterRow): string {
   if (row.disciple.canBreakthrough) return 'is-ready';
@@ -364,18 +464,43 @@ watch(
       </div>
     </div>
 
-    <p class="disciple-count" role="status" aria-live="polite">
-      匹配 <strong>{{ rows.length }}</strong> / 共 <strong>{{ disciples.length }}</strong> 位门人
-    </p>
+    <div class="disciple-count-bar">
+      <p class="disciple-count" role="status" aria-live="polite">
+        匹配 <strong>{{ rows.length }}</strong> / 共 <strong>{{ disciples.length }}</strong> 位门人
+      </p>
+      <button
+        v-if="disciples.length > 0"
+        class="quiet-button disciple-more disciple-select-toggle"
+        :class="{ 'is-active': selecting }"
+        type="button"
+        :aria-pressed="selecting"
+        @click="toggleSelecting"
+      >
+        {{ selecting ? '退出多选' : '多选' }}
+      </button>
+    </div>
 
     <ul v-if="rows.length > 0" class="disciple-list">
       <li
         v-for="(row, index) in rows"
         :key="row.disciple.id"
         class="disciple-row"
-        :class="[`status-${row.displayStatus.key}`, row.journeyClass]"
+        :class="[
+          `status-${row.displayStatus.key}`,
+          row.journeyClass,
+          { 'is-selecting': selecting, 'is-selected': selecting && selectedSet.has(row.disciple.id) },
+        ]"
         :style="rowIndexStyle(index)"
+        @click="onRowClick(row.disciple.id, $event)"
       >
+        <label v-if="selecting" class="disciple-select-check">
+          <input
+            type="checkbox"
+            :checked="selectedSet.has(row.disciple.id)"
+            :aria-label="`选择 ${row.disciple.name}`"
+            @change="toggleSelected(row.disciple.id)"
+          />
+        </label>
         <div class="disciple-row-media">
           <!--
             可破境：头像本身是按钮（点开确认弹窗，不发请求）。
@@ -436,7 +561,19 @@ watch(
         <!-- 状态单独占一行：不再和境界标签挤在同一行里抢宽度。
              历练标记（在外 / 待领取）也在这里，玩家一眼能看出这名弟子不在宗门正常当值。 -->
         <div class="disciple-card-status">
-          <span class="disciple-status" :class="`is-${row.displayStatus.key}`">
+          <!-- 「疗伤中」本身就是回春丹入口：样式不变，点一下直接服丹（多选模式下仍按勾选处理）。 -->
+          <button
+            v-if="row.displayStatus.key === 'injured' && !selecting"
+            class="disciple-status is-injured disciple-status-button"
+            type="button"
+            :disabled="busy"
+            :title="`服用回春丹，治好${row.disciple.name}的伤势`"
+            :aria-label="`${row.disciple.name}疗伤中，服用回春丹`"
+            @click="emit('quickHeal', row.disciple.id)"
+          >
+            {{ row.displayStatus.label }}
+          </button>
+          <span v-else class="disciple-status" :class="`is-${row.displayStatus.key}`">
             {{ row.displayStatus.label }}
           </span>
         </div>
@@ -484,6 +621,54 @@ watch(
       <strong>没有符合条件的门人</strong>
       <p>当前筛选条件下没有结果，可放宽条件或直接重置。</p>
       <button class="quiet-button" type="button" @click="resetFilter">重置筛选</button>
+    </div>
+
+    <!-- 多选底栏：吸附在名册底部；换岗下拉即选即提交，突破 / 疗伤先开确认弹窗。 -->
+    <div v-if="selecting" class="disciple-batch-bar" role="toolbar" aria-label="批量操作">
+      <span class="disciple-batch-count">已选 <strong>{{ selectedIds.length }}</strong> 人</span>
+      <button
+        class="quiet-button disciple-more"
+        type="button"
+        :disabled="rows.length === 0"
+        @click="toggleSelectVisible"
+      >
+        {{ allVisibleSelected ? '取消全选' : `全选筛选结果（${rows.length}）` }}
+      </button>
+      <button class="quiet-button disciple-reset" type="button" :disabled="selectedIds.length === 0" @click="clearSelection">
+        清空
+      </button>
+      <span class="disciple-batch-actions">
+        <span class="disciple-select disciple-batch-assign">
+          <select
+            class="disciple-input"
+            aria-label="批量换岗"
+            :disabled="busy || selectedIds.length === 0"
+            @change="onBatchAssignChange"
+          >
+            <option value="">批量换岗…</option>
+            <option v-for="option in assignments" :key="option.id" :value="option.id">
+              {{ option.name }}
+            </option>
+          </select>
+        </span>
+        <button
+          class="action-button primary-action disciple-batch-breakthrough"
+          type="button"
+          :disabled="busy || selectedIds.length === 0"
+          @click="onBatchBreakthrough"
+        >
+          批量突破
+        </button>
+        <button
+          v-if="selectionHasHealable"
+          class="action-button disciple-batch-heal"
+          type="button"
+          :disabled="busy"
+          @click="onBatchHeal"
+        >
+          批量疗伤
+        </button>
+      </span>
     </div>
   </div>
 </template>

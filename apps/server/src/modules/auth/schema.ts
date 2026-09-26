@@ -30,11 +30,21 @@ export const loginRequestSchema = z.strictObject({
   password: passwordSchema,
 });
 
+/**
+ * 修改密码：旧密码只校验长度上限（旧账号的密码可能是早期规则下设的，不能因新规则而无法验证），
+ * 新密码走与注册相同的规则；新旧相同由 service 拒绝。
+ */
+export const changePasswordRequestSchema = z.strictObject({
+  oldPassword: z.string().min(1, '请输入当前密码').max(MAX_PASSWORD_LENGTH),
+  newPassword: passwordSchema,
+});
+
 /** 空 body：不接受任何字段，避免客户端塞入 userId 之类的越权参数。 */
 export const emptyRequestSchema = z.strictObject({});
 
 export type RegisterRequest = z.infer<typeof registerRequestSchema>;
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
+export type ChangePasswordRequest = z.infer<typeof changePasswordRequestSchema>;
 
 export function normalizeAccount(account: string): string {
   return account.trim().toLowerCase();

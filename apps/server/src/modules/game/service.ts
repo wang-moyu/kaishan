@@ -12,7 +12,8 @@ import {
 } from '../../infra/openrouter/decisions';
 import {
   alchemyUnlockBlockedReason,
-  bodyTemperingTarget,
+  bodyTemperingPlan,
+  cultivationPillsToFull,
   findPillRecipe,
   BODY_TEMPERING_MAX_USES,
   CULTIVATION_PILL_GAIN,
@@ -26,6 +27,8 @@ import {
   ATTRIBUTE_MAX,
   ATTRIBUTE_STAKES,
   DAO_INSIGHT_CAP,
+  DAO_INSIGHT_OVERFLOW_STONE,
+  daoInsightRoom,
   DEBATE_DAILY_LIMIT,
   DEGRADED_WIN_RATES,
   FREE_BET_MIN,
@@ -100,10 +103,7 @@ import {
   IDLE_ASSIGNMENT,
   RECRUIT_REFRESH_PER_LEVEL,
   SPIRITUAL_ARRAY_BUILDING_ID,
-  STONE_MINING_ASSIGNMENT,
-  STONE_MINING_LIMIT_HIGH,
-  STONE_MINING_LIMIT_LOW,
-  STONE_MINING_UNLOCK_SECT_LEVEL,
+  assignmentLimitOf,
   breakthroughEnergyCost,
   dateKeyUtc8,
   effectiveCapacity,
@@ -115,6 +115,9 @@ import {
   nextSectLevel,
   nextStageOf,
   realmIndex,
+  isSeverelyInjured,
+  severeInjuryLeftText,
+  SEVERE_INJURY_MS,
 } from './constants';
 import { drawEncounters, type EncounterDef } from './encounters';
 import { EVENT_HISTORY_LIMIT, RECENT_EVENTS_IN_SYNC } from './events';
@@ -144,9 +147,49 @@ import {
   partyCombatPower,
 } from './realms';
 import {
+  BAG_CAPACITY,
+  EQUIPMENT_SLOTS,
+  FORGE_QUALITY,
+  FORGE_WORKSHOP_ID,
+  XUANTIE_RESOURCE_ID,
+  bossXuantieFor,
+  BOSS_XUANTIE_MIN_SHARE,
+  forgeRecipeOf,
+  forgeWorkshopUpgradeFrom,
+  qualityColorOf,
+  qualityNameOf,
+  forgeFailRefund,
+  forgeOddsOf,
+  lowerQuality,
+  rollForgeResult,
+  realmXuantieDrop,
+  realmXuantieDropText,
+  salvageXuantieUnits,
+  bagFullReason,
+  bossDropQualities,
+  bossHighDropChance,
+  rollBossDrop,
+  forgeUnlockBlockedReason,
+  gearBonusOf,
+  gearBonusOfDisciple,
+  gearPowerBonusBpOf,
+  gearPowerBonusBpOfDisciple,
+  generateEquipment,
+  isEquipmentQuality,
+  isEquipmentSlot,
+  resolveMainAttr,
+  salvageOreUnits,
+  slotNameOf,
+  withGear,
+  type AttrSet,
+  type EquipmentAttr,
+  type EquipmentSlot,
+} from './equipment';
+import {
   BuildingRepository,
   ChallengeRepository,
   DiscipleRepository,
+  EquipmentRepository,
   EventLogRepository,
   ExplorationRepository,
   PillInventoryRepository,
@@ -157,12 +200,17 @@ import {
   challengeSnapshotGuardStatement,
   deleteAlchemySnapshotGuardStatement,
   deleteChallengeSnapshotGuardStatement,
+  deleteBagEquipmentStatement,
   deleteDiscipleSnapshotGuardStatement,
   deleteDiscipleStatement,
+  deleteEquipmentStatement,
+  discipleMembersGuardStatement,
   discipleSnapshotGuardStatement,
+  equipmentGuardStatements,
   insertBuildingStatement,
   insertChallengeLogStatement,
   insertDiscipleStatement,
+  insertEquipmentStatement,
   insertEventLogStatement,
   insertExplorationStatement,
   insertResourceBalanceStatement,
@@ -179,7 +227,9 @@ import {
   updateDiscipleNoteStatement,
   updateDiscipleProgressStatement,
   updatePillInventoryQuantityStatement,
+  refreshDiscipleGearStatement,
   updateResourceSettledStatement,
+  updateEquipmentHolderStatement,
   updateSectChallengeCounterStatement,
   updateSectDefenseLineupStatement,
   updateSectLevelStatement,
@@ -193,6 +243,7 @@ import {
   type DiscipleRow,
   type EventLogRow,
   type PillInventoryRow,
+  type EquipmentRow,
   type ResourceBalanceRow,
   type SectRow,
 } from './repository';
@@ -235,11 +286,65 @@ import {
   RaceRepository,
   insertRaceBetStatement,
   insertRaceRoundStatement,
+  resourceCreditCappedStatement,
   resourceDeltaStatement,
   settleRaceRoundStatement,
   updateRaceRoundPoolStatement,
 } from './repository';
-import { settleEconomy, type SettleResult } from './settle';
+import {
+  WorldBossRepository,
+  incrementPillInventoryStatement,
+  insertDiscipleBossBattleStatement,
+  insertWorldBossHitStatement,
+  markWorldBossFledStatement,
+  markWorldBossHalfAnnouncedStatement,
+  markWorldBossHitLastHitStatement,
+  markWorldBossRewardedStatement,
+  setDiscipleSevereInjuryStatement,
+  updateWorldBossHpStatement,
+  type WorldBossHitRow,
+  type WorldBossRow,
+  type WorldBossSectDamageRow,
+} from './repository';
+import { settleEconomy, resourceRates, type SettleResult } from './settle';
+import {
+  BOSS_MERIT_RESOURCE_ID,
+  WORLD_BOSS_AFFIX_NONE,
+  WORLD_BOSS_CLOSE_HOUR,
+  WORLD_BOSS_COOLDOWN_MS,
+  WORLD_BOSS_DAILY_ATTACK_LIMIT_DEFAULT,
+  WORLD_BOSS_FATIGUE_WINDOW_MS,
+  WORLD_BOSS_INJURY_DURATION_MS,
+  WORLD_BOSS_KILL_PILL_ID,
+  WORLD_BOSS_MAX_PARTY,
+  MERIT_SHOP_CATEGORIES,
+  WORLD_BOSS_MERIT_SHOP,
+  WORLD_BOSS_MERIT_XUANTIE_MAX,
+  WORLD_BOSS_MIN_PARTY,
+  WORLD_BOSS_OPEN_HOUR,
+  WORLD_BOSS_TOP_DAMAGE_PILL_ID,
+  affixNameOf,
+  bossDefAt,
+  bossDisplayName,
+  bossIndexFor,
+  dayIndexUtc8,
+  discipleContribution,
+  expectedPartyDamage,
+  findAffix,
+  findMeritShopItem,
+  isFledByDamage,
+  isWorldBossAttackable,
+  lastHitReward,
+  parseDailyAttackLimit,
+  rollAffix,
+  rollDamage,
+  rollOutcome,
+  stageMaxHp,
+  stageResourceRewards,
+  worldBossRewardPreview,
+  worldBossMeritFor,
+  worldBossPhaseOf,
+} from './worldBoss';
 
 import {
   JOURNEY_DIRECTIONS,
@@ -269,6 +374,9 @@ import {
 import {
   breakthroughChanceBp,
   buildSectStateView,
+  buildEquipmentView,
+  equipmentSlotViews,
+  equipmentItemViewOf,
   eventLogViewFromRow,
   upgradeCost,
   type ChallengeBlockedReason,
@@ -313,8 +421,18 @@ import {
   type DiscipleLeaderboardEntryView,
   type DiscipleLeaderboardView,
   type ChatMessageView,
+  type WorldBossAttackResultView,
+  type WorldBossCurrentView,
+  type WorldBossHitView,
+  type WorldBossRankView,
+  type WorldBossView,
+  type MeritShopView,
+  type WorldBossDefView,
+  type WorldBossAffixView,
+  type WorldBossMemberOutcomeView,
+  type EquipmentView,
+  type DiscipleProfileView,
 } from './view';
-
 /**
  * 游戏服务（一次性可玩版本）。
  *
@@ -573,6 +691,11 @@ class SectDraft {
   /** 0019 赌坊：论道当日次数（可变：受理一次论道后在本层更新，随 view() 返回新口径）。 */
   debateDay: DebateDayState;
   readonly recruitUsedToday: number;
+  /**
+   * 0025 世界 Boss：本宗此刻能否出手。只有 GET /game/sync（getSectState）会置为真值；
+   * 其余命令返回的 view 里保持 false，前端以 sync 下发的角标为准。
+   */
+  worldBossAttackable = false;
 
   private readonly statements: ParameterizedQuery[] = [];
   /** 0014：未领取的历练记录（在外中 + 待领取）；本批可能被完成 / 领取而改变。 */
@@ -614,11 +737,22 @@ class SectDraft {
     const lastSettledAt = Number(base.sect.last_settled_at);
     // 0014：未领取的历练就是「在外区间」；结算只屏蔽这些区间内的岗位产出与静修，
     // 结算窗口（含唯一的 12 小时上限）与随机事件判定仍然各只有一份。
+    // 0014：未领取的历练就是「在外区间」；结算只屏蔽这些区间内的岗位产出与静修，
+    // 结算窗口（含唯一的 12 小时上限）与随机事件判定仍然各只有一份。
+    // 二期阶段一：重伤同样按「不在岗区间」追加 —— 重伤期间不产出、不修炼
+    // （settleEconomy 自己按结算窗口裁剪这段区间）。
     const absences = this.journeys.map((row) => ({
       discipleId: row.disciple_id,
       startMs: Number(row.started_at),
       endMs: Number(row.ends_at),
     }));
+    for (const row of base.disciples) {
+      const until = row.severe_injured_until === null ? null : Number(row.severe_injured_until);
+      if (until === null) continue;
+      // 起点取 0（到期前一律视为不在岗），不用 until − 时长倒推：时长调整过（3 天 → 1 天）时，
+      // 按旧时长打出的重伤会被倒推错。被打成重伤的那次出手已把宗门结算到当时，之后的窗口都在受伤之后，不会误扣。
+      absences.push({ discipleId: row.id, startMs: 0, endMs: until });
+    }
     this.settleResult = settleEconomy({
       config: this.config,
       lastSettledAt,
@@ -759,6 +893,20 @@ class SectDraft {
     this.addStatement(resourceDeltaStatement(this.sect.id, resourceId, -amount, this.now));
   }
 
+  /**
+   * 加资源（正 delta，不检查容量）：写库语句与**内存余额**一起更新。
+   * 0028 装备（分解 / 驱逐超额分解 / Boss 掉落的矿石返还）用这条，
+   * 这样随命令返回的 state.resources 立刻就是入账后的新值（与探索奖励同一做法）。
+   */
+  addResource(resourceId: string, amount: number): void {
+    this.balances = this.balances.map((row) =>
+      row.resource_id === resourceId
+        ? { ...row, balance: Number(row.balance) + amount, updated_at: this.now }
+        : row,
+    );
+    this.addStatement(resourceDeltaStatement(this.sect.id, resourceId, amount, this.now));
+  }
+
   addStatement(statement: ParameterizedQuery): void {
     this.statements.push(statement);
   }
@@ -887,6 +1035,7 @@ class SectDraft {
       journeys: this.journeys,
       recentJourneys: this.recentRowsForView(),
       activeExploration: this.activeExplorationView(),
+      worldBossAttackable: this.worldBossAttackable,
     });
   }
 
@@ -898,6 +1047,12 @@ class SectDraft {
      * 传了就进守卫 —— 这条库存必须仍是读快照时的数量，否则整批回滚。
      */
     pillId?: string;
+    /**
+     * 0028 装备：本次写入涉及的装备行（快照时的归属人必须没变）。
+     * 炼器 / 卸下 / 分解 / 驱逐都传它 —— 少了这条会出现「装备表归属是 B，
+     * 但 A 的 gear 列还算着这件装备」（见 equipmentGuardStatement 注释）。
+     */
+    equipmentItems?: readonly { id: string; discipleId: string | null }[];
   } = {}): Promise<void> {
     if (this.statements.length === 0) {
       return;
@@ -913,6 +1068,18 @@ class SectDraft {
         ? {}
         : { pill: { pillId: options.pillId, quantity: this.basePillQuantity(options.pillId) } }),
     });
+    if (options.equipmentItems !== undefined && options.equipmentItems.length > 0) {
+      // 一次最多 50 件 → 守卫按 EQUIPMENT_PER_GUARD 切片（D1 单条语句 100 个参数上限）。
+      const equipment = equipmentGuardStatements(
+        commandId,
+        this.base.sect.id,
+        options.equipmentItems,
+      );
+      guard.guards.push(...equipment.guards);
+      guard.cleanup.push(
+        ...equipment.guardIds.map((id) => deleteDiscipleSnapshotGuardStatement(id)),
+      );
+    }
     try {
       await this.db.batch(prepareStatements(this.db, [
         ...guard.guards,
@@ -933,18 +1100,19 @@ class SectDraft {
     }
   }
 
-  async commitAlchemy(pillId: string, discipleId?: string): Promise<void> {
+  async commitAlchemy(pillId: string, discipleIds: readonly string[] = []): Promise<void> {
     const commandId = crypto.randomUUID();
-    const disciple = discipleId === undefined
-      ? undefined
-      : this.base.disciples.find((row) => row.id === discipleId);
+    const disciples = discipleIds.flatMap((id) => {
+      const row = this.base.disciples.find((item) => item.id === id);
+      return row === undefined ? [] : [row];
+    });
     const guard = alchemySnapshotGuardStatement(commandId, {
       sect: this.base.sect,
       balances: this.base.balances,
       buildings: this.base.buildings,
       pillId,
       pillQuantity: this.base.pillInventories.find((row) => row.pill_id === pillId)?.quantity ?? 0,
-      ...(disciple === undefined ? {} : { disciple }),
+      disciples,
     });
     try {
       await this.db.batch(prepareStatements(this.db, [
@@ -975,26 +1143,69 @@ class SectDraft {
        * 只有保存私有备注是 true（计划 2.3 明确允许在外保存备注），其余一律 false。
        */
       allowActiveJourney?: boolean;
+      /**
+       * 二期阶段一：是否允许成员此刻仍「重伤卧床」。
+       * 与 allowActiveJourney 同一口径：改名 / 备注 / 头像框 / 驱逐，以及晋升的资格判定传 true
+       * （重伤弟子仍是本宗门人、境界不变），其余路径一律 false（默认拒绝）。
+       */
+      allowSevereInjury?: boolean;
+      /** 0028 装备：本次写入涉及的装备行（快照时的归属人必须没变）。 */
+      equipmentItems?: readonly { id: string; discipleId: string | null }[];
     },
   ): Promise<void> {
     const commandId = crypto.randomUUID();
+    const rejectAwayMembers = options?.allowActiveJourney !== true;
+    const rejectSevereMembers = options?.allowSevereInjury !== true;
+    // D1 单条语句最多 100 个绑定参数：首条守卫只带前 MEMBERS_PER_GUARD 名成员，其余按片另起守卫行。
+    const MEMBERS_PER_GUARD = 10;
     const guard = discipleSnapshotGuardStatement(commandId, {
       sect: this.base.sect,
       balances: this.base.balances,
-      members,
+      members: members.slice(0, MEMBERS_PER_GUARD),
       now: this.now,
-      rejectAwayMembers: options?.allowActiveJourney !== true,
+      rejectAwayMembers,
+      rejectSevereMembers,
       ...(defenseLineup === undefined ? {} : { defenseLineup }),
     });
+    const guardIds = [commandId];
+    const memberGuards: ParameterizedQuery[] = [];
+    for (let start = MEMBERS_PER_GUARD; start < members.length; start += MEMBERS_PER_GUARD) {
+      const guardId = `${commandId}:members:${String(start)}`;
+      guardIds.push(guardId);
+      memberGuards.push(discipleMembersGuardStatement(
+        guardId,
+        this.base.sect.id,
+        members.slice(start, start + MEMBERS_PER_GUARD),
+        this.now,
+        rejectAwayMembers,
+        rejectSevereMembers,
+      ));
+    }
+    if (options?.equipmentItems !== undefined && options.equipmentItems.length > 0) {
+      // 守卫按 EQUIPMENT_PER_GUARD 切片（D1 单条语句 100 个参数上限）。
+      const equipment = equipmentGuardStatements(
+        commandId,
+        this.base.sect.id,
+        options.equipmentItems,
+      );
+      guardIds.push(...equipment.guardIds);
+      memberGuards.push(...equipment.guards);
+    }
     try {
       await this.db.batch(prepareStatements(this.db, [
         guard,
+        ...memberGuards,
         ...this.statements,
-        deleteDiscipleSnapshotGuardStatement(commandId),
+        ...guardIds.map((id) => deleteDiscipleSnapshotGuardStatement(id)),
       ]));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/CHECK constraint failed: (?:valid = 1|mutation_guards)/i.test(message)) {
+        throw new AppError('INVALID_STATUS', '宗门状态已变化，请刷新后重试');
+      }
+      // 0028 装备：同一件装备 / 同一个部位被并发改动时，装备表的唯一索引会失败。
+      // 数据本身是安全的（整批回滚），这里把它映射成和其它并发冲突一样的业务错误。
+      if (/UNIQUE constraint failed: equipment/i.test(message)) {
         throw new AppError('INVALID_STATUS', '宗门状态已变化，请刷新后重试');
       }
       throw error;
@@ -1451,15 +1662,20 @@ export async function getSectState(
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const snapshot = await loadSnapshot(db, userId, now);
     if (snapshot === null) return null;
+    // 0025 讨伐：按钮角标要的「此刻能不能出手」只在 sync 里算（两条走索引的小查询）；
+    // 不在开放时段时 worldBossAttackableFor 提前返回，连查询都省掉。
+    const worldBossAttackable = await worldBossAttackableFor(db, now);
     // 省 D1 写入：前端每分钟自动同步一次，若每次都把结算写回，挂机玩家一小时就要写上千行。
     // 产出是按时间确定性计算的，晚几分钟写回结果不变；所以距上次写回不足 SYNC_PERSIST_INTERVAL_MS 时
     // 只在内存里结算并返回（不掷随机事件——事件按经过时长计期望次数，推迟写回不会少发），
     // 有历练归队时仍照常落库。玩家的主动操作不走这里，照旧立即写入。
     if (now - Number(snapshot.sect.last_settled_at) < SYNC_PERSIST_INTERVAL_MS) {
       const preview = new SectDraft(db, snapshot, now, () => 1);
+      preview.worldBossAttackable = worldBossAttackable;
       if (!preview.hasJourneyReturns) return preview.view();
     }
     const draft = new SectDraft(db, snapshot, now);
+    draft.worldBossAttackable = worldBossAttackable;
     try {
       await draft.commit();
       return draft.view();
@@ -1519,6 +1735,13 @@ export async function createSect(
       name: randomDiscipleName(),
       gender: randomGender(),
       ...attributes,
+      // 0028 装备：新弟子还没有装备，6 个冗余列都是 0。
+      gear_attack: 0,
+      gear_defense: 0,
+      gear_speed: 0,
+      gear_luck: 0,
+      gear_physique: 0,
+      gear_power_bp: 0,
       talent: generateTalent(Math.random),
       realm_id: template.realm,
       stage: template.stage,
@@ -1526,6 +1749,7 @@ export async function createSect(
       cultivation_remainder: 0,
       assignment: template.assignment,
       injured_until: null,
+      severe_injured_until: null,
       body_tempering_count: 0,
       note: '',
       // 0019：初始弟子悟道值为 0（只能通过赌坊获得）。
@@ -1854,6 +2078,13 @@ export async function recruitDisciple(
     speed: candidate.speed,
     luck: candidate.luck,
     physique: candidate.physique,
+    // 0028 装备：新招募的弟子还没有装备，6 个冗余列都是 0。
+    gear_attack: 0,
+    gear_defense: 0,
+    gear_speed: 0,
+    gear_luck: 0,
+    gear_physique: 0,
+    gear_power_bp: 0,
     talent: candidate.talent,
     realm_id: 'qiRefining',
     stage: 1,
@@ -1861,6 +2092,7 @@ export async function recruitDisciple(
     cultivation_remainder: 0,
     assignment: IDLE_ASSIGNMENT,
     injured_until: null,
+    severe_injured_until: null,
     body_tempering_count: 0,
     note: '',
     avatar_frame_id: 'classic',
@@ -1960,6 +2192,90 @@ export async function refreshRecruit(
 }
 
 /** 派工：结算 → 校验岗位 → 更新弟子岗位。 */
+/**
+ * 某名弟子此刻不能执行某个操作的原因（单个命令抛 error；批量命令把 reason 记进跳过列表）。
+ * reason 是不带弟子名的短句，批量结果里与弟子名并列展示。
+ */
+interface DiscipleBlocker {
+  error: AppError;
+  reason: string;
+}
+
+/** 批量命令里被跳过的弟子。 */
+export interface BatchSkippedDisciple {
+  discipleId: string;
+  discipleName: string;
+  reason: string;
+}
+
+/** 批量命令里按 id 找本宗弟子；找不到（已被驱逐 / 他宗 id）记为跳过。 */
+function discipleOrSkip(
+  draft: SectDraft,
+  discipleId: string,
+  skipped: BatchSkippedDisciple[],
+): DiscipleRow | undefined {
+  const disciple = draft.disciples.find((row) => row.id === discipleId);
+  if (disciple === undefined) {
+    skipped.push({ discipleId, discipleName: '未知弟子', reason: '已不在本宗' });
+  }
+  return disciple;
+}
+
+/** 批量命令一个都没执行时的报错文案：列出前几名被跳过的弟子与原因。 */
+function allSkippedMessage(prefix: string, skipped: readonly BatchSkippedDisciple[]): string {
+  const shown = skipped.slice(0, 3).map((item) => `${item.discipleName}：${item.reason}`);
+  const more = skipped.length > 3 ? ` 等 ${String(skipped.length)} 人` : '';
+  return `${prefix}（${shown.join('；')}${more}）`;
+}
+
+/** 岗位 id 必须是闲置或配置里的岗位（单个与批量转岗共用）。 */
+function requireValidAssignment(draft: SectDraft, assignment: string): void {
+  const validAssignments = new Set<string>([
+    IDLE_ASSIGNMENT,
+    ...draft.config.positions.map((position) => position.id),
+  ]);
+  if (!validAssignments.has(assignment)) {
+    throw new AppError('VALIDATION_ERROR', '未知岗位', { assignment });
+  }
+}
+
+/** 岗位展示名（闲置不在配置岗位里）。 */
+function assignmentNameOf(draft: SectDraft, assignment: string): string {
+  if (assignment === IDLE_ASSIGNMENT) return '闲置';
+  return draft.config.positions.find((position) => position.id === assignment)?.name ?? assignment;
+}
+
+/** 转岗校验（单个与批量共用）：可以转岗返回 null。按内存里的当前岗位计数，批量时逐个占位。 */
+function assignmentBlocker(
+  draft: SectDraft,
+  disciple: DiscipleRow,
+  assignment: string,
+): DiscipleBlocker | null {
+  // 0014：在外弟子不能转岗（原岗位名额仍为他保留，归队后自动恢复产出）。
+  const away = unavailableBlocker(draft, disciple, '转岗');
+  if (away !== null) return away;
+
+  // 有人数上限的岗位（采灵：宗门 6 级前 1 人、6 级起 2 人；吐纳：2 人）。
+  // item.id !== disciple.id：弟子本来就在该岗位时，重复派工不该算占位。
+  const limit = assignmentLimitOf(assignment, Number(draft.sect.level));
+  if (limit !== null) {
+    const currentCount = draft.disciples.filter(
+      (item) => item.assignment === assignment && item.id !== disciple.id,
+    ).length;
+    if (currentCount >= limit) {
+      const name = draft.config.positions.find((position) => position.id === assignment)?.name ?? assignment;
+      const message = `${name}岗位已满（上限 ${limit} 人）`;
+      return { error: new AppError('CAPACITY_FULL', message), reason: message };
+    }
+  }
+  return null;
+}
+
+function applyAssignment(draft: SectDraft, disciple: DiscipleRow, assignment: string): void {
+  draft.addStatement(updateDiscipleAssignmentStatement(disciple.id, assignment));
+  disciple.assignment = assignment;
+}
+
 export async function assignDisciple(
   db: D1Database,
   userId: string,
@@ -1968,41 +2284,76 @@ export async function assignDisciple(
   now: number,
 ): Promise<SectStateView> {
   const draft = await draftFor(db, userId, now);
-  const validAssignments = new Set<string>([
-    IDLE_ASSIGNMENT,
-    ...draft.config.positions.map((position) => position.id),
-  ]);
-  if (!validAssignments.has(assignment)) {
-    throw new AppError('VALIDATION_ERROR', '未知岗位', { assignment });
-  }
+  requireValidAssignment(draft, assignment);
 
   const disciple = draft.discipleById(discipleId);
-
-  // 0014：在外弟子不能转岗（原岗位名额仍为他保留，归队后自动恢复产出）。
-  requireNotAway(draft, disciple, '转岗');
-
-  // V5.1 改动三：采灵岗位有人数上限（宗门 6 级前 1 人、6 级起 2 人）。
-  // item.id !== discipleId：弟子本来就在采灵岗位时，重复派工不该算占位。
-  if (assignment === STONE_MINING_ASSIGNMENT) {
-    const limit =
-      Number(draft.sect.level) >= STONE_MINING_UNLOCK_SECT_LEVEL
-        ? STONE_MINING_LIMIT_HIGH
-        : STONE_MINING_LIMIT_LOW;
-    const currentCount = draft.disciples.filter(
-      (item) => item.assignment === STONE_MINING_ASSIGNMENT && item.id !== discipleId,
-    ).length;
-    if (currentCount >= limit) {
-      throw new AppError('CAPACITY_FULL', `采灵岗位已满（上限 ${limit} 人）`);
-    }
-  }
-
-  const nextAssignment = assignment;
-  draft.addStatement(updateDiscipleAssignmentStatement(disciple.id, nextAssignment));
-  disciple.assignment = nextAssignment;
+  const blocker = assignmentBlocker(draft, disciple, assignment);
+  if (blocker !== null) throw blocker.error;
+  applyAssignment(draft, disciple, assignment);
 
   // 驱逐可能在读快照后先提交；不能对已离宗弟子返回一次成功派工。
   await draft.commitDisciple([{ id: disciple.id }]);
   return draft.view();
+}
+
+/** 批量转岗结果（POST /game/assign-batch 的 outcome）。 */
+export interface AssignBatchOutcome {
+  assignment: string;
+  assignmentName: string;
+  assigned: { discipleId: string; discipleName: string }[];
+  skipped: BatchSkippedDisciple[];
+}
+
+/**
+ * 批量转岗：结算 → 岗位校验 → 按请求顺序逐个校验并生效（不符合条件的跳过并记原因）
+ * → 一次受保护 batch。采灵岗位按顺序占满名额，其余跳过。
+ * 已在目标岗位的弟子记为跳过（无需变动）。一个都没转成时报 INVALID_STATUS，不写库。
+ */
+export async function assignDisciplesBatch(
+  db: D1Database,
+  userId: string,
+  discipleIds: readonly string[],
+  assignment: string,
+  now: number,
+): Promise<{ state: SectStateView; outcome: AssignBatchOutcome }> {
+  const draft = await draftFor(db, userId, now);
+  requireValidAssignment(draft, assignment);
+  const assignmentName = assignmentNameOf(draft, assignment);
+
+  const assigned: DiscipleRow[] = [];
+  const skipped: BatchSkippedDisciple[] = [];
+  for (const discipleId of discipleIds) {
+    const disciple = discipleOrSkip(draft, discipleId, skipped);
+    if (disciple === undefined) continue;
+    if (disciple.assignment === assignment) {
+      skipped.push({ discipleId, discipleName: disciple.name, reason: `已在${assignmentName}岗位` });
+      continue;
+    }
+    const blocker = assignmentBlocker(draft, disciple, assignment);
+    if (blocker !== null) {
+      skipped.push({ discipleId, discipleName: disciple.name, reason: blocker.reason });
+      continue;
+    }
+    applyAssignment(draft, disciple, assignment);
+    assigned.push(disciple);
+  }
+
+  if (assigned.length === 0) {
+    throw new AppError('INVALID_STATUS', allSkippedMessage(`没有弟子可以转到${assignmentName}`, skipped), {
+      skipped,
+    });
+  }
+
+  await draft.commitDisciple(assigned.map((row) => ({ id: row.id })));
+  return {
+    state: draft.view(),
+    outcome: {
+      assignment,
+      assignmentName,
+      assigned: assigned.map((row) => ({ discipleId: row.id, discipleName: row.name })),
+      skipped,
+    },
+  };
 }
 
 /** 升级建筑：结算 → 检查等级上限与资源 → 扣资源 + 等级 +1。 */
@@ -2024,7 +2375,15 @@ export async function upgradeBuilding(
     });
   }
 
-  const cost = upgradeCost(definition.upgradeCostPerLevel, building.level);
+  // 装备二期：炼器坊走分档表（宗门等级门槛 + 玄铁），其余建筑沿用线性升级消耗。
+  const workshopStep = defId === FORGE_WORKSHOP_ID ? forgeWorkshopUpgradeFrom(building.level) : null;
+  if (workshopStep !== null && Number(draft.sect.level) < workshopStep.sectLevel) {
+    throw new AppError(
+      'INVALID_STATUS',
+      `${definition.name}升到 ${String(workshopStep.level)} 级需要宗门 ${String(workshopStep.sectLevel)} 级`,
+    );
+  }
+  const cost = workshopStep !== null ? workshopStep.cost : upgradeCost(definition.upgradeCostPerLevel, building.level);
   for (const [resourceId, amount] of Object.entries(cost)) {
     draft.requireResource(resourceId, Number(amount));
   }
@@ -2046,6 +2405,42 @@ export interface BreakthroughOutcome {
   message: string;
 }
 
+/** 破境资格（单个与批量共用，不含灵气）：可以破境返回 null。 */
+function breakthroughBlocker(draft: SectDraft, disciple: DiscipleRow): DiscipleBlocker | null {
+  // 0014：在外弟子不能破境（服务端裁决）。
+  const away = unavailableBlocker(draft, disciple, '破境');
+  if (away !== null) return away;
+
+  const stage = findStage(disciple.realm_id, disciple.stage);
+  if (stage.requiredCultivation === null) {
+    return { error: new AppError('INVALID_STATUS', '已达本版本最高境界'), reason: '已达最高境界' };
+  }
+  if (disciple.injured_until !== null && Number(disciple.injured_until) > draft.now) {
+    const remainingSeconds = Math.ceil((Number(disciple.injured_until) - draft.now) / 1000);
+    return {
+      error: new AppError('COOLDOWN_ACTIVE', '突破失败后的调息尚未结束', { remainingSeconds }),
+      reason: '调息 / 疗伤中',
+    };
+  }
+  if (Number(disciple.cultivation) < stage.requiredCultivation) {
+    return {
+      error: new AppError('INVALID_STATUS', '修为不足，先让弟子修炼', {
+        required: stage.requiredCultivation,
+        cultivation: Number(disciple.cultivation),
+      }),
+      reason: '修为未到门槛',
+    };
+  }
+  return null;
+}
+
+/** 本宗当前的破境成功率（万分比，由聚灵阵等级决定）。 */
+function breakthroughChanceOf(draft: SectDraft): number {
+  const arrayLevel =
+    draft.buildings.find((building) => building.def_id === SPIRITUAL_ARRAY_BUILDING_ID)?.level ?? 0;
+  return breakthroughChanceBp(draft.config, arrayLevel);
+}
+
 /** 突破：结算 → 门槛/冷却/灵气检查 → 扣灵气 → 抽一次随机。 */
 export async function breakthrough(
   db: D1Database,
@@ -2056,31 +2451,99 @@ export async function breakthrough(
   const draft = await draftFor(db, userId, now);
   const disciple = draft.discipleById(discipleId);
 
-  // 0014：在外弟子不能破境（服务端裁决）。
-  requireNotAway(draft, disciple, '破境');
-  const { config } = draft;
+  const blocker = breakthroughBlocker(draft, disciple);
+  if (blocker !== null) throw blocker.error;
 
+  draft.requireResource('spiritualEnergy', breakthroughEnergyCost(disciple.stage));
+  const outcome = resolveBreakthrough(draft, disciple, breakthroughChanceOf(draft));
+
+  // 同批核对弟子仍属本宗，避免驱逐先提交后白扣灵气、破境写入影响 0 行。
+  await draft.commitDisciple([{ id: disciple.id }]);
+  return { state: draft.view(), outcome };
+}
+
+/** 批量破境结果（POST /game/breakthrough-batch 的 outcome）。 */
+export interface BreakthroughBatchOutcome {
+  /** 逐人结果（按请求顺序）。 */
+  results: BreakthroughOutcome[];
+  skipped: BatchSkippedDisciple[];
+  /** 本次共消耗的灵气（最小单位）。 */
+  energySpent: string;
+}
+
+/**
+ * 批量破境：结算 → 逐个校验资格（不满足的跳过并记原因）→ 灵气须够全部可破境弟子，
+ * 不够就整批拒绝（提示减少人数，不替玩家挑人）→ 扣灵气 → 逐人抽随机 → 一次受保护 batch。
+ * 一个可破境的都没有时报 INVALID_STATUS，不写库。
+ */
+export async function breakthroughBatch(
+  db: D1Database,
+  userId: string,
+  discipleIds: readonly string[],
+  now: number,
+): Promise<{ state: SectStateView; outcome: BreakthroughBatchOutcome }> {
+  const draft = await draftFor(db, userId, now);
+
+  const eligible: DiscipleRow[] = [];
+  const skipped: BatchSkippedDisciple[] = [];
+  for (const discipleId of discipleIds) {
+    const disciple = discipleOrSkip(draft, discipleId, skipped);
+    if (disciple === undefined) continue;
+    const blocker = breakthroughBlocker(draft, disciple);
+    if (blocker !== null) {
+      skipped.push({ discipleId, discipleName: disciple.name, reason: blocker.reason });
+      continue;
+    }
+    eligible.push(disciple);
+  }
+
+  if (eligible.length === 0) {
+    throw new AppError('INVALID_STATUS', allSkippedMessage('所选弟子都不满足突破条件', skipped), {
+      skipped,
+    });
+  }
+
+  const energyCost = eligible.reduce(
+    (sum, disciple) => sum + breakthroughEnergyCost(disciple.stage),
+    0,
+  );
+  const energyBalance = draft.balanceOf('spiritualEnergy');
+  if (energyBalance < energyCost) {
+    const energyName = draft.resourceName('spiritualEnergy');
+    throw new AppError(
+      'INSUFFICIENT_RESOURCE',
+      `${energyName}不足：${String(eligible.length)} 名弟子突破共需 ${displayAmount(energyCost)}，当前 ${displayAmount(energyBalance)}，请减少突破弟子数量`,
+      {
+        resourceId: 'spiritualEnergy',
+        required: String(energyCost),
+        balance: String(energyBalance),
+        lacking: String(energyCost - energyBalance),
+      },
+    );
+  }
+  draft.requireResource('spiritualEnergy', energyCost);
+
+  const chanceBp = breakthroughChanceOf(draft);
+  const results = eligible.map((disciple) => resolveBreakthrough(draft, disciple, chanceBp));
+
+  await draft.commitDisciple(eligible.map((row) => ({ id: row.id })));
+  return {
+    state: draft.view(),
+    outcome: { results, skipped, energySpent: String(energyCost) },
+  };
+}
+
+/** 抽一次破境随机并写回（资格已校验、灵气已扣）。 */
+function resolveBreakthrough(
+  draft: SectDraft,
+  disciple: DiscipleRow,
+  chanceBp: number,
+): BreakthroughOutcome {
+  const { config, now } = draft;
   const stage = findStage(disciple.realm_id, disciple.stage);
   if (stage.requiredCultivation === null) {
     throw new AppError('INVALID_STATUS', '已达本版本最高境界');
   }
-  if (disciple.injured_until !== null && Number(disciple.injured_until) > now) {
-    const remainingSeconds = Math.ceil((Number(disciple.injured_until) - now) / 1000);
-    throw new AppError('COOLDOWN_ACTIVE', '突破失败后的调息尚未结束', { remainingSeconds });
-  }
-  if (Number(disciple.cultivation) < stage.requiredCultivation) {
-    throw new AppError('INVALID_STATUS', '修为不足，先让弟子修炼', {
-      required: stage.requiredCultivation,
-      cultivation: Number(disciple.cultivation),
-    });
-  }
-
-  const cost = breakthroughEnergyCost(disciple.stage);
-  draft.requireResource('spiritualEnergy', cost);
-
-  const arrayLevel =
-    draft.buildings.find((building) => building.def_id === SPIRITUAL_ARRAY_BUILDING_ID)?.level ?? 0;
-  const chanceBp = breakthroughChanceBp(config, arrayLevel);
   const roll = Math.floor(Math.random() * 10_000);
   const success = roll < chanceBp;
 
@@ -2120,22 +2583,17 @@ export async function breakthrough(
     disciple.injured_until = injuredUntil;
   }
 
-  // 同批核对弟子仍属本宗，避免驱逐先提交后白扣灵气、破境写入影响 0 行。
-  await draft.commitDisciple([{ id: disciple.id }]);
   return {
-    state: draft.view(),
-    outcome: {
-      discipleId: disciple.id,
-      discipleName: disciple.name,
-      success,
-      chanceBp,
-      roll,
-      message: success
-        ? `${disciple.name} 突破成功，境界提升`
-        : `${disciple.name} 突破失败，修为跌落（保留 ${String(
-            Math.floor((stage.requiredCultivation * config.breakthrough.failureKeepBp) / 10_000),
-          )}）`,
-    },
+    discipleId: disciple.id,
+    discipleName: disciple.name,
+    success,
+    chanceBp,
+    roll,
+    message: success
+      ? `${disciple.name} 突破成功，境界提升`
+      : `${disciple.name} 突破失败，修为跌落（保留 ${String(
+          Math.floor((stage.requiredCultivation * config.breakthrough.failureKeepBp) / 10_000),
+        )}）`,
   };
 }
 
@@ -2188,7 +2646,10 @@ export async function setDiscipleNote(
   disciple.note = normalized;
 
   // 计划 2.3：在外期间**可以**继续保存私有备注，所以这条路径不要求成员「不在外」。
-  await draft.commitDisciple([{ id: disciple.id }], undefined, { allowActiveJourney: true });
+  await draft.commitDisciple([{ id: disciple.id }], undefined, {
+    allowActiveJourney: true,
+    allowSevereInjury: true,
+  });
   return draft.view();
 }
 
@@ -2219,7 +2680,10 @@ export async function setDiscipleAvatarFrame(
   disciple.avatar_frame_id = frameId;
 
   // 头像框是纯外观，与私有备注一样允许在外历练期间更改（不要求成员「不在外」）。
-  await draft.commitDisciple([{ id: disciple.id }], undefined, { allowActiveJourney: true });
+  await draft.commitDisciple([{ id: disciple.id }], undefined, {
+    allowActiveJourney: true,
+    allowSevereInjury: true,
+  });
   return draft.view();
 }
 
@@ -2354,7 +2818,10 @@ export async function renameDisciple(
   draft.addStatement(updateDiscipleNameStatement(disciple.id, draft.sect.id, normalized));
   disciple.name = normalized;
 
-  await draft.commitDisciple([{ id: disciple.id }], undefined, { allowActiveJourney: true });
+  await draft.commitDisciple([{ id: disciple.id }], undefined, {
+    allowActiveJourney: true,
+    allowSevereInjury: true,
+  });
   return draft.view();
 }
 
@@ -2366,6 +2833,10 @@ export interface ExpelDiscipleOutcome {
   lineupCleared: boolean;
   /** 驱逐后宗门剩余弟子数（< 3 时无法组成主动挑战阵容、也不能被挑战）。 */
   remainingDisciples: number;
+  /** 0028 装备：回到背包的件数（背包放不下的部分不会计入这里）。 */
+  equipmentReturned: number;
+  /** 0028 装备：因背包已满而自动分解返还的矿石（最小单位；没触发为 0）。 */
+  salvagedOre: number;
 }
 
 /**
@@ -2378,6 +2849,9 @@ export interface ExpelDiscipleOutcome {
  *   不在阵容内时阵容一个字都不改；
  * - 历史快照（challenge_log / sparring_log / explorations）与公开档案不回写；返回的 state 里
  *   人数相关视图（招募容量、宗门升级要求、守擂）已经是新人数。
+ * - 0028 装备：他身上的装备全部回到背包（同一 batch）；背包已满时装不下的那几件
+ *   自动分解成矿石入账（计划 1.5）。装备行也进守卫（归属人必须仍是读到的快照）。
+ *
  *
  * 并发（计划 2.5 末条）：commitDisciple 的首条快照守卫在 batch 执行时重新核对宗门行、资源
  * 余额、被驱逐弟子仍属本宗，以及阵容仍与读到的快照一致；任一冲突整批回滚并映射成
@@ -2400,6 +2874,36 @@ export async function expelDisciple(
     throw new AppError('INVALID_STATUS', `${disciple.name}正在秘境探索中，探索结束后才能驱逐`);
   }
 
+  // 0028 装备：他身上的装备全部回到背包；背包装不下的部分自动分解为矿石。
+  // 顺序固定为（部位表顺序 → id），保证同一堆装备每次自动分解的都是同一批。
+  const sectEquipment = await new EquipmentRepository(db).findBySectId(draft.sect.id);
+  const slotOrder = (slot: string): number =>
+    EQUIPMENT_SLOTS.findIndex((item) => item.id === slot);
+  const wornItems = sectEquipment
+    .filter((row) => row.disciple_id === disciple.id)
+    .sort((a, b) => slotOrder(a.slot) - slotOrder(b.slot) || a.id.localeCompare(b.id));
+  let bagCount = sectEquipment.filter((row) => row.disciple_id === null).length;
+  let equipmentReturned = 0;
+  let salvagedOre = 0;
+  let salvagedXuantie = 0;
+  for (const item of wornItems) {
+    if (bagCount < BAG_CAPACITY) {
+      draft.addStatement(updateEquipmentHolderStatement(item.id, draft.sect.id, null));
+      bagCount += 1;
+      equipmentReturned += 1;
+      continue;
+    }
+    draft.addStatement(deleteEquipmentStatement(item.id, draft.sect.id));
+    salvagedOre += isEquipmentQuality(item.quality) ? salvageOreUnits(item.quality) : 0;
+    salvagedXuantie += isEquipmentQuality(item.quality) ? salvageXuantieUnits(item.quality) : 0;
+  }
+  if (salvagedOre > 0) {
+    draft.addResource('ore', salvagedOre);
+  }
+  if (salvagedXuantie > 0) {
+    draft.addResource(XUANTIE_RESOURCE_ID, salvagedXuantie);
+  }
+
   // 阵容守卫必须用「读到的库值」：守卫是本批第一条语句，此时本批写入还没执行。
   const lineupSnapshot = draft.sect.defense_lineup;
   const lineupCleared = lineupContainsDisciple(lineupSnapshot, disciple.id);
@@ -2411,7 +2915,10 @@ export async function expelDisciple(
     draft.sect.defense_lineup = null;
   }
 
-  await draft.commitDisciple([{ id: disciple.id }], lineupSnapshot);
+  await draft.commitDisciple([{ id: disciple.id }], lineupSnapshot, {
+    allowSevereInjury: true,
+    equipmentItems: wornItems.map((row) => ({ id: row.id, discipleId: row.disciple_id })),
+  });
   return {
     state: draft.view(),
     outcome: {
@@ -2419,6 +2926,8 @@ export async function expelDisciple(
       discipleName: disciple.name,
       lineupCleared,
       remainingDisciples: draft.disciples.length,
+      equipmentReturned,
+      salvagedOre,
     },
   };
 }
@@ -2506,6 +3015,7 @@ export async function upgradeSect(
 
   await draft.commitDisciple([...requiredDisciples].map((id) => ({ id })), undefined, {
     allowActiveJourney: true,
+    allowSevereInjury: true,
   });
   return draft.view();
 }
@@ -2632,6 +3142,7 @@ export async function exploreSectRealm(
     defense: number;
     speed: number;
     talent: string;
+    gearPowerBonusBp: number;
     name: string;
   }[] = [];
   for (const id of discipleIds) {
@@ -2641,13 +3152,16 @@ export async function exploreSectRealm(
     if (disciple.injured_until !== null && Number(disciple.injured_until) > now) {
       throw new AppError('INVALID_STATUS', `${disciple.name}正在疗伤，无法出战`);
     }
+    // 0028 装备：秘境速通（/game/explore）计入装备 —— 战力用「基础属性 + 装备加成」。
+    const attrs = battleAttrsOf(disciple);
     members.push({
       realmId: disciple.realm_id,
       stage: Number(disciple.stage),
-      attack: Number(disciple.attack),
-      defense: Number(disciple.defense),
-      speed: Number(disciple.speed),
+      attack: attrs.attack,
+      defense: attrs.defense,
+      speed: attrs.speed,
       talent: disciple.talent,
+      gearPowerBonusBp: gearPowerBonusBpOfDisciple(disciple),
       name: disciple.name,
     });
   }
@@ -2688,6 +3202,17 @@ export async function exploreSectRealm(
           : row,
       );
       actualRewards[resourceId] = amount;
+    }
+    // 装备二期：高级秘境成功时低概率掉玄铁（与固定奖励同一批入账）。
+    const xuantie = realmXuantieDrop(realm.id, Math.random) * 1000;
+    if (xuantie > 0) {
+      draft.addStatement(resourceDeltaStatement(draft.sect.id, XUANTIE_RESOURCE_ID, xuantie, now));
+      draft.balances = draft.balances.map((row) =>
+        row.resource_id === XUANTIE_RESOURCE_ID
+          ? { ...row, balance: Number(row.balance) + xuantie, updated_at: now }
+          : row,
+      );
+      actualRewards[XUANTIE_RESOURCE_ID] = String(xuantie);
     }
   }
 
@@ -2774,6 +3299,7 @@ export async function listSecretRealms(
       difficulty: realm.difficulty,
       entryCost: realm.entryCost,
       rewards: realm.rewards,
+      bonusDropText: realmXuantieDropText(realm.id),
       minParty: realm.minParty,
       maxParty: realm.maxParty,
       dailyLimit: realm.dailyLimit,
@@ -2797,6 +3323,45 @@ const SPARRING_WIN_SPIRIT_STONE = 100_000;
 /** 实际战力 = 基础战力 × (0.85 ~ 1.15)（V3 第 4.2 节）。 */
 function fluctuatedPower(basePower: number): number {
   return Math.floor(basePower * (0.85 + Math.random() * 0.3));
+}
+
+/**
+ * 0028 装备：一名弟子的**战斗属性** = 基础属性 + 装备加成（只读弟子表上 5 个冗余列）。
+ *
+ * 计划 1.2 的计入口径（每个调用点都另有一段说明）：
+ *   计入：挑战（攻方与守擂）、秘境探索（速通 / 交互式）、世界 Boss、弟子视图战力、
+ *         天骄榜战力、切磋；
+ *   不计入：弟子历练、论道赌局、综合评分、悟道值加点上限。
+ * 加法由 equipment.ts 的 withGear 实现：加成后可以超过 100，基础属性本身仍最高 100。
+ */
+function battleAttrsOf(disciple: DiscipleRow): AttrSet {
+  return withGear(
+    {
+      attack: Number(disciple.attack),
+      defense: Number(disciple.defense),
+      speed: Number(disciple.speed),
+      luck: Number(disciple.luck),
+      physique: Number(disciple.physique),
+    },
+    gearBonusOfDisciple(disciple),
+  );
+}
+
+/**
+ * 0028：弟子战力（**计入装备**）——把「基础属性 + 装备加成」与 0032 的装备战力加成
+ * 一起传给 realms.ts 的战力函数。
+ */
+function gearedCombatPower(disciple: DiscipleRow): number {
+  const attrs = battleAttrsOf(disciple);
+  return discipleCombatPower(
+    disciple.realm_id,
+    Number(disciple.stage),
+    attrs.attack,
+    attrs.defense,
+    attrs.speed,
+    disciple.talent,
+    gearPowerBonusBpOfDisciple(disciple),
+  );
 }
 
 /** 镇派弟子：境界（realmIndex）→ 阶段 → 资质逐级比较取最高；没有弟子返回 null。 */
@@ -2862,10 +3427,11 @@ export async function listLeaderboard(
 const DISCIPLE_LEADERBOARD_SIZE = 10;
 
 /**
- * 弟子榜单：战力 top 10 + 综合分 top 10，只读、不结算、不写库。
+ * 弟子榜单：战力 / 综合分 / 装备 各 top 10，只读、不结算、不写库。
  *
  * 遍历所有宗门的弟子，服务端现算战力与综合评分（与 sync 视图同一口径），
- * 分别按两个维度取 top 10 返回。规模小（几十个弟子）不需要 SQL 层面优化。
+ * 分别按三个维度取 top 10 返回。规模小（几十个弟子）不需要 SQL 层面优化。
+ * 装备榜只读弟子表上的冗余列排名，最后再为榜上 10 人查一次各部位品质。
  */
 export async function listDiscipleLeaderboard(
   db: D1Database,
@@ -2885,19 +3451,22 @@ export async function listDiscipleLeaderboard(
     sectId: string;
     combatPower: number;
     score: number;
+    gearPowerBonusBp: number;
+    /** 装备加的 5 项属性点之和（装备榜同分时比它）。 */
+    gearAttrTotal: number;
   }
   const all: RankedDisciple[] = [];
   for (const sect of sects) {
     const disciples = await discipleRepository.findBySectId(sect.id);
     for (const d of disciples) {
+      // 0028 装备：天骄榜的「战力」计入装备；「综合评分」不计入（计划 1.2 明列）。
+      const gear = gearBonusOfDisciple(d);
       all.push({
         row: d,
         sectId: sect.id,
-        combatPower: discipleCombatPower(
-          d.realm_id, Number(d.stage),
-          Number(d.attack), Number(d.defense), Number(d.speed),
-          d.talent,
-        ),
+        combatPower: gearedCombatPower(d),
+        gearPowerBonusBp: gearPowerBonusBpOfDisciple(d),
+        gearAttrTotal: gear.attack + gear.defense + gear.speed + gear.luck + gear.physique,
         score: attributeScore({
           aptitude: Number(d.aptitude),
           attack: Number(d.attack),
@@ -2930,6 +3499,7 @@ export async function listDiscipleLeaderboard(
       attributeScore: item.score,
       talent: item.row.talent,
       talentName: findTalent(item.row.talent)?.name ?? '无',
+      gearPowerBonusBp: item.gearPowerBonusBp,
       isMe: item.sectId === mySectId,
     };
   }
@@ -2944,7 +3514,98 @@ export async function listDiscipleLeaderboard(
     .slice(0, DISCIPLE_LEADERBOARD_SIZE)
     .map((item, i) => toEntry(item, i + 1));
 
-  return { byCombatPower, byAttributeScore };
+  // 0032 装备榜：没穿装备（加成 0）的不上榜；按装备战力加成 → 装备属性总和 → 战力排序。
+  const equipmentTop = all
+    .filter((item) => item.gearPowerBonusBp > 0)
+    .sort(
+      (a, b) =>
+        b.gearPowerBonusBp - a.gearPowerBonusBp ||
+        b.gearAttrTotal - a.gearAttrTotal ||
+        b.combatPower - a.combatPower,
+    )
+    .slice(0, DISCIPLE_LEADERBOARD_SIZE);
+  const worn = await new EquipmentRepository(db).findWornQualitiesByDiscipleIds(
+    equipmentTop.map((item) => item.row.id),
+  );
+  const byEquipment = equipmentTop.map((item, i) => ({
+    ...toEntry(item, i + 1),
+    gearSlots: EQUIPMENT_SLOTS.map((slot) => {
+      const quality =
+        worn.find((row) => row.disciple_id === item.row.id && row.slot === slot.id)?.quality ?? null;
+      return {
+        slot: slot.id,
+        slotName: slot.name,
+        quality,
+        qualityName: quality === null ? null : qualityNameOf(quality),
+        color: quality === null ? null : qualityColorOf(quality),
+      };
+    }),
+  }));
+
+  return { byCombatPower, byAttributeScore, byEquipment };
+}
+
+/** 天骄榜点开的弟子公开档案（只读、不结算、不写库；任何登录玩家都能看，弟子不存在 404）。 */
+export async function getDiscipleProfile(
+  db: D1Database,
+  userId: string,
+  discipleId: string,
+  now: number,
+): Promise<DiscipleProfileView> {
+  const sectRepository = new SectRepository(db);
+  const disciple = await new DiscipleRepository(db).findById(discipleId);
+  if (disciple === null) {
+    throw new AppError('NOT_FOUND', '弟子不存在');
+  }
+  const [sect, mySect, items] = await Promise.all([
+    sectRepository.findById(disciple.sect_id),
+    sectRepository.findByUserId(userId),
+    new EquipmentRepository(db).findByDiscipleId(discipleId),
+  ]);
+  const talent = findTalent(disciple.talent);
+  const severeUntil = disciple.severe_injured_until === null ? 0 : Number(disciple.severe_injured_until);
+  const injuredUntil = disciple.injured_until === null ? 0 : Number(disciple.injured_until);
+  return {
+    discipleId: disciple.id,
+    name: disciple.name,
+    gender: disciple.gender,
+    realmId: disciple.realm_id,
+    frameId: disciple.avatar_frame_id,
+    sectId: disciple.sect_id,
+    sectName: sect?.name ?? '',
+    isMe: mySect?.id === disciple.sect_id,
+    realmName: findRealm(disciple.realm_id).name,
+    stageName: findStage(disciple.realm_id, Number(disciple.stage)).name,
+    talent: disciple.talent,
+    talentName: talent?.name ?? '无',
+    talentDescription: talent?.description ?? '',
+    aptitude: Number(disciple.aptitude),
+    attack: Number(disciple.attack),
+    defense: Number(disciple.defense),
+    speed: Number(disciple.speed),
+    luck: Number(disciple.luck),
+    physique: Number(disciple.physique),
+    gear: {
+      attack: Number(disciple.gear_attack) || 0,
+      defense: Number(disciple.gear_defense) || 0,
+      speed: Number(disciple.gear_speed) || 0,
+      luck: Number(disciple.gear_luck) || 0,
+      physique: Number(disciple.gear_physique) || 0,
+    },
+    combatPower: gearedCombatPower(disciple),
+    attributeScore: attributeScore({
+      aptitude: Number(disciple.aptitude),
+      attack: Number(disciple.attack),
+      defense: Number(disciple.defense),
+      speed: Number(disciple.speed),
+      luck: Number(disciple.luck),
+      physique: Number(disciple.physique),
+    }),
+    bodyTemperingUses: Number(disciple.body_tempering_count) || 0,
+    daoInsightUsed: Number(disciple.dao_insight_used) || 0,
+    injury: severeUntil > now ? 'severe' : injuredUntil > now ? 'injured' : null,
+    equipment: items.map((row) => equipmentItemViewOf(row, disciple.name)),
+  };
 }
 
 /**
@@ -2977,13 +3638,20 @@ export async function getPublicSect(
   const config = gameConfig();
 
   // 0014：守方实时在外状态参与裁决（跨宗读取只用于能否应战的安全判断，不公开他人结果）。
+  // 二期阶段一：重伤卧床的守方弟子同样按空位处理（不上场）。
   const defenderAwayIds = journeyAwayIds(
     await new DiscipleJourneyRepository(db).findOpenBySectId(sectId),
     now,
   );
+  const unavailableDefenderIds = new Set([
+    ...defenderAwayIds,
+    ...disciples
+      .filter((row) => isSeverelyInjured(row.severe_injured_until, now))
+      .map((row) => row.id),
+  ]);
   const plan = planDefenseLineup(
     sect.defense_lineup,
-    availableDefenders(disciples, defenderAwayIds),
+    availableDefenders(disciples, unavailableDefenderIds),
   );
   let challenge: PublicSectChallengeView | null = null;
   if (viewerSect !== null) {
@@ -3054,14 +3722,8 @@ export async function getPublicSect(
       realmOrder: realmIndex(disciple.realm_id),
       stage: Number(disciple.stage),
       stageName: findStage(disciple.realm_id, Number(disciple.stage)).name,
-      combatPower: discipleCombatPower(
-        disciple.realm_id,
-        Number(disciple.stage),
-        Number(disciple.attack),
-        Number(disciple.defense),
-        Number(disciple.speed),
-        disciple.talent,
-      ),
+      // 0028 装备：公开档案的「战力」计入装备（这里展示的攻/防/身法仍是基础属性）。
+      combatPower: gearedCombatPower(disciple),
     })),
     buildings: buildings.map((building) => ({
       name: config.buildings.find((item) => item.id === building.def_id)?.name ?? building.def_id,
@@ -3127,26 +3789,9 @@ export async function sparWithSect(
     throw new AppError('NOT_FOUND', '对方弟子不存在');
   }
 
-  const myPower = fluctuatedPower(
-    discipleCombatPower(
-      myDisciple.realm_id,
-      Number(myDisciple.stage),
-      Number(myDisciple.attack),
-      Number(myDisciple.defense),
-      Number(myDisciple.speed),
-      myDisciple.talent,
-    ),
-  );
-  const targetPower = fluctuatedPower(
-    discipleCombatPower(
-      targetDisciple.realm_id,
-      Number(targetDisciple.stage),
-      Number(targetDisciple.attack),
-      Number(targetDisciple.defense),
-      Number(targetDisciple.speed),
-      targetDisciple.talent,
-    ),
-  );
+  // 0028 装备：切磋是「战斗」（不是历练 / 论道 / 综合评分），双方战力都计入装备。
+  const myPower = fluctuatedPower(gearedCombatPower(myDisciple));
+  const targetPower = fluctuatedPower(gearedCombatPower(targetDisciple));
   const result: SparResultView['result'] =
     myPower > targetPower ? 'win' : myPower < targetPower ? 'lose' : 'draw';
 
@@ -3564,22 +4209,24 @@ export async function challengeSect(
     if (disciple.injured_until !== null && Number(disciple.injured_until) > now) {
       throw new AppError('INVALID_STATUS', `${disciple.name}正在疗伤，无法出战`);
     }
+    // 0028 装备：挑战（攻方）计入装备 —— 战力与上下文属性都用「基础 + 装备加成」。
+    const attrs = battleAttrsOf(disciple);
     const stage = Number(disciple.stage);
-    const attack = Number(disciple.attack);
-    const defense = Number(disciple.defense);
-    const speed = Number(disciple.speed);
     attackerRichMembers.push({
       discipleId: disciple.id,
       name: disciple.name,
-      power: discipleCombatPower(disciple.realm_id, stage, attack, defense, speed, disciple.talent),
+      power: discipleCombatPower(
+        disciple.realm_id, stage, attrs.attack, attrs.defense, attrs.speed, disciple.talent,
+        gearPowerBonusBpOfDisciple(disciple),
+      ),
       realmName: findStage(disciple.realm_id, stage).name,
       stage,
-      attack,
-      defense,
-      speed,
+      attack: attrs.attack,
+      defense: attrs.defense,
+      speed: attrs.speed,
       aptitude: Number(disciple.aptitude),
-      luck: Number(disciple.luck),
-      physique: Number(disciple.physique),
+      luck: attrs.luck,
+      physique: attrs.physique,
       talent: disciple.talent,
     });
   }
@@ -3593,30 +4240,39 @@ export async function challengeSect(
     await new DiscipleJourneyRepository(db).findOpenBySectId(targetSect.id),
     now,
   );
-  // 候选池 = 不在外的守方弟子；手动阵容与自动守擂都只看这一份名单。
-  const defenders = availableDefenders(defenderDisciples, defenderAwayIds);
+  // 候选池 = 既不在外、也不重伤卧床的守方弟子（二期阶段一：重伤按空位处理）；
+  // 手动阵容与自动守擂都只看这一份名单。
+  const unavailableDefenderIds = new Set([
+    ...defenderAwayIds,
+    ...defenderDisciples
+      .filter((row) => isSeverelyInjured(row.severe_injured_until, now))
+      .map((row) => row.id),
+  ]);
+  const defenders = availableDefenders(defenderDisciples, unavailableDefenderIds);
   const plan = planDefenseLineup(targetSect.defense_lineup, defenders);
   if (!plan.canDefend) {
     throw new AppError('INVALID_STATUS', '对方门下弟子不足 3 人，暂时无法应战');
   }
   const defenseMode: DefenseMode = plan.mode;
   const toRichMember = (disciple: (typeof defenders)[number]): ChallengeRichMember => {
+    // 0028 装备：挑战（守擂方）同上 —— 守方弟子身上的装备同样计入。
+    const attrs = battleAttrsOf(disciple);
     const stage = Number(disciple.stage);
-    const attack = Number(disciple.attack);
-    const defense = Number(disciple.defense);
-    const speed = Number(disciple.speed);
     return {
       discipleId: disciple.id,
       name: disciple.name,
-      power: discipleCombatPower(disciple.realm_id, stage, attack, defense, speed, disciple.talent),
+      power: discipleCombatPower(
+        disciple.realm_id, stage, attrs.attack, attrs.defense, attrs.speed, disciple.talent,
+        gearPowerBonusBpOfDisciple(disciple),
+      ),
       realmName: findStage(disciple.realm_id, stage).name,
       stage,
-      attack,
-      defense,
-      speed,
+      attack: attrs.attack,
+      defense: attrs.defense,
+      speed: attrs.speed,
       aptitude: Number(disciple.aptitude),
-      luck: Number(disciple.luck),
-      physique: Number(disciple.physique),
+      luck: attrs.luck,
+      physique: attrs.physique,
       talent: disciple.talent,
     };
   };
@@ -3836,12 +4492,16 @@ export interface UsePillOutcome {
   pillName: string;
   discipleId: string;
   discipleName: string;
+  /** 实际服用颗数（请求颗数按「服到满所需」与库存截断后的结果）。 */
+  count: number;
   effect: {
     kind: 'heal' | 'cultivation' | 'bodyTempering';
-    /** cultivation / bodyTempering 的提升量。 */
+    /** cultivation / bodyTempering 的总提升量。 */
     gain?: number;
-    /** bodyTempering 服务端自动选中的短板属性。 */
+    /** bodyTempering 第一颗补的短板属性。 */
     attribute?: PillAttribute;
+    /** bodyTempering 各属性的累计提升量（连服时可能补到不止一项）。 */
+    gains?: Partial<Record<PillAttribute, number>>;
   };
 }
 
@@ -3914,12 +4574,17 @@ export async function craftPill(
  *   已达本版本最高阶段或修为已满门槛的弟子不能用。
  * - 淬体丹：服务端自动选短板（attack -> defense -> speed），每名弟子最多 10 次；
  *   没有短板时拒绝。不使用随机数。
+ *
+ * count（想服几颗）：聚气丹 / 淬体丹按「服到满所需」与库存截断，至少服 1 颗
+ * （库存为 0 时照常报库存不足）；回春丹一颗就治好，恒为 1。实际颗数见 outcome.count。
+ * 连服只写一次最终值，仍是一次 batch。
  */
 export async function usePill(
   db: D1Database,
   userId: string,
   pillId: string,
   discipleId: string,
+  count: number,
   now: number,
 ): Promise<{ state: SectStateView; outcome: UsePillOutcome }> {
   const draft = await draftFor(db, userId, now);
@@ -3927,6 +4592,10 @@ export async function usePill(
   const recipe = requirePillRecipe(pillId);
   const disciple = draft.discipleById(discipleId);
 
+  // 二期阶段一：重伤卧床时服丹一律无效；回春丹另外给「伤势过重」的专门文案。
+  if (recipe.id === 'healingPill' && isSeverelyInjured(disciple.severe_injured_until, now)) {
+    throw new AppError('INVALID_STATUS', '伤势过重，丹药无效');
+  }
   // 0014：在外 / 有待领取记录的弟子不能服药（服务端裁决，不只禁用按钮）。
   requireNotAway(draft, disciple, '服药');
 
@@ -3937,7 +4606,7 @@ export async function usePill(
     draft.requirePill(recipe.id);
     draft.addStatement(updateDiscipleInjuryStatement(disciple.id, null));
     disciple.injured_until = null;
-    await draft.commitAlchemy(recipe.id, disciple.id);
+    await draft.commitAlchemy(recipe.id, [disciple.id]);
     return {
       state: draft.view(),
       outcome: {
@@ -3945,6 +4614,7 @@ export async function usePill(
         pillName: recipe.name,
         discipleId: disciple.id,
         discipleName: disciple.name,
+        count: 1,
         effect: { kind: 'heal' },
       },
     };
@@ -3958,18 +4628,22 @@ export async function usePill(
     if (Number(disciple.cultivation) >= stage.requiredCultivation) {
       throw new AppError('INVALID_STATUS', `${disciple.name}修为已达突破门槛，请先突破再服用聚气丹`);
     }
-    const gain = Math.min(
-      CULTIVATION_PILL_GAIN,
-      stage.requiredCultivation - Number(disciple.cultivation),
+    const remaining = stage.requiredCultivation - Number(disciple.cultivation);
+    const used = Math.min(
+      count,
+      cultivationPillsToFull(Number(disciple.cultivation), stage.requiredCultivation),
+      Math.max(1, draft.pillQuantity(recipe.id)),
     );
-    draft.requirePill(recipe.id);
+    // 最后一颗可能只生效一部分：总增益封顶到门槛。
+    const gain = Math.min(CULTIVATION_PILL_GAIN * used, remaining);
+    draft.removePill(recipe.id, used);
     const cultivation = Number(disciple.cultivation) + gain;
     // 修为余数保持不变：不因服药丢弃离线结算的小数余量。
     draft.addStatement(
       updateDiscipleCultivationStatement(disciple.id, cultivation, Number(disciple.cultivation_remainder)),
     );
     disciple.cultivation = cultivation;
-    await draft.commitAlchemy(recipe.id, disciple.id);
+    await draft.commitAlchemy(recipe.id, [disciple.id]);
     return {
       state: draft.view(),
       outcome: {
@@ -3977,6 +4651,7 @@ export async function usePill(
         pillName: recipe.name,
         discipleId: disciple.id,
         discipleName: disciple.name,
+        count: used,
         effect: { kind: 'cultivation', gain },
       },
     };
@@ -3990,23 +4665,33 @@ export async function usePill(
       `${disciple.name}已服用淬体丹 ${BODY_TEMPERING_MAX_USES} 次，药力已满`,
     );
   }
-  const target = bodyTemperingTarget(
+  const plan = bodyTemperingPlan(
     Number(disciple.attack),
     Number(disciple.defense),
     Number(disciple.speed),
+    uses,
+    Math.min(count, Math.max(1, draft.pillQuantity(recipe.id))),
   );
-  if (target === null) {
+  const first = plan[0];
+  if (first === undefined) {
     throw new AppError('INVALID_STATUS', `${disciple.name}没有需要补齐的属性短板`);
   }
-  draft.requirePill(recipe.id);
-  const nextValue = Number(disciple[target.attribute]) + target.gain;
-  const nextUses = uses + 1;
-  disciple[target.attribute] = nextValue;
+  draft.removePill(recipe.id, plan.length);
+  const gains: Partial<Record<PillAttribute, number>> = {};
+  for (const step of plan) {
+    gains[step.attribute] = (gains[step.attribute] ?? 0) + step.gain;
+  }
+  const nextUses = uses + plan.length;
   disciple.body_tempering_count = nextUses;
-  draft.addStatement(
-    updateDiscipleBodyTemperingStatement(disciple.id, target.attribute, nextValue, nextUses),
-  );
-  await draft.commitAlchemy(recipe.id, disciple.id);
+  // 每个被补到的属性只写一次最终值（同批语句都把次数写成同一个最终值）。
+  for (const [attribute, gain] of Object.entries(gains) as [PillAttribute, number][]) {
+    const nextValue = Number(disciple[attribute]) + gain;
+    disciple[attribute] = nextValue;
+    draft.addStatement(
+      updateDiscipleBodyTemperingStatement(disciple.id, attribute, nextValue, nextUses),
+    );
+  }
+  await draft.commitAlchemy(recipe.id, [disciple.id]);
   return {
     state: draft.view(),
     outcome: {
@@ -4014,8 +4699,502 @@ export async function usePill(
       pillName: recipe.name,
       discipleId: disciple.id,
       discipleName: disciple.name,
-      effect: { kind: 'bodyTempering', gain: target.gain, attribute: target.attribute },
+      count: plan.length,
+      effect: {
+        kind: 'bodyTempering',
+        gain: plan.reduce((sum, step) => sum + step.gain, 0),
+        attribute: first.attribute,
+        gains,
+      },
     },
+  };
+}
+
+/** 批量疗伤结果（POST /game/heal-batch 的 outcome）。 */
+export interface HealBatchOutcome {
+  /** 治好的弟子（按请求顺序）。 */
+  healed: { discipleId: string; discipleName: string }[];
+  skipped: BatchSkippedDisciple[];
+  /** 本次消耗的回春丹颗数（= healed.length）。 */
+  pillsUsed: number;
+}
+
+/**
+ * 批量疗伤（回春丹，一人一颗）：结算 → 解锁检查 → 逐个校验（重伤 / 在外 / 无伤的跳过并记原因）
+ * → 库存须够全部伤员，不够就整批拒绝（不替玩家挑人）→ 扣库存 + 清伤势，一次 `commitAlchemy`。
+ * 一个需要治的都没有时报 INVALID_STATUS，不写库。
+ */
+export async function healDisciplesBatch(
+  db: D1Database,
+  userId: string,
+  discipleIds: readonly string[],
+  now: number,
+): Promise<{ state: SectStateView; outcome: HealBatchOutcome }> {
+  const draft = await draftFor(db, userId, now);
+  requireAlchemyUnlocked(draft);
+  const recipe = requirePillRecipe('healingPill');
+
+  const eligible: DiscipleRow[] = [];
+  const skipped: BatchSkippedDisciple[] = [];
+  for (const discipleId of discipleIds) {
+    const disciple = discipleOrSkip(draft, discipleId, skipped);
+    if (disciple === undefined) continue;
+    // 与单个服用同一口径：重伤先于在外（回春丹对重伤无效）。
+    let reason: string | null = null;
+    if (severeInjuryBlocker(draft, disciple) !== null) {
+      reason = '重伤卧床，丹药无效';
+    } else {
+      reason = awayBlocker(draft, disciple, '服药')?.reason ?? null;
+    }
+    if (reason === null && (disciple.injured_until === null || Number(disciple.injured_until) <= now)) {
+      reason = '没有伤势';
+    }
+    if (reason !== null) {
+      skipped.push({ discipleId, discipleName: disciple.name, reason });
+      continue;
+    }
+    eligible.push(disciple);
+  }
+
+  if (eligible.length === 0) {
+    throw new AppError('INVALID_STATUS', allSkippedMessage('所选弟子都不需要疗伤', skipped), { skipped });
+  }
+
+  const owned = draft.pillQuantity(recipe.id);
+  if (owned < eligible.length) {
+    throw new AppError(
+      'INVALID_STATUS',
+      `${recipe.name}不足：${String(eligible.length)} 名弟子疗伤共需 ${String(eligible.length)} 颗，当前库存 ${String(owned)} 颗，请减少人数或先炼制`,
+      { required: eligible.length, owned },
+    );
+  }
+  draft.removePill(recipe.id, eligible.length);
+
+  for (const disciple of eligible) {
+    draft.addStatement(updateDiscipleInjuryStatement(disciple.id, null));
+    disciple.injured_until = null;
+  }
+
+  await draft.commitAlchemy(recipe.id, eligible.map((row) => row.id));
+  return {
+    state: draft.view(),
+    outcome: {
+      healed: eligible.map((row) => ({ discipleId: row.id, discipleName: row.name })),
+      skipped,
+      pillsUsed: eligible.length,
+    },
+  };
+}
+
+/* ---------- 装备（0028 迁移：炼器 / 背包 / 穿戴 / 分解；规则见 equipment.ts） ---------- */
+
+/** 炼器回执（纯命令结果）；不属于任何公开视图。 */
+export interface ForgeEquipmentOutcome {
+  /** 装备二期：success = 所选品质；downgrade = 低一档；fail = 没出装备（refund 为返还）。 */
+  result: 'success' | 'downgrade' | 'fail';
+  /** 失败时为 null。 */
+  equipmentId: string | null;
+  name: string | null;
+  slot: string;
+  slotName: string;
+  quality: string | null;
+  /** 失败返还（最小单位）；成功 / 降级为空对象。 */
+  refund: Record<string, number>;
+  /** 本次消耗（最小单位），与 equipment.ts 的 FORGE_COST 同一份。 */
+  cost: Record<string, string>;
+}
+
+/** 穿戴 / 卸下回执。 */
+export interface EquipChangeOutcome {
+  equipmentId: string;
+  name: string;
+  slot: string;
+  slotName: string;
+  /** 现在穿在谁身上；卸下后为 null（已回背包）。 */
+  discipleId: string | null;
+  discipleName: string | null;
+  /** 该部位被换回背包的那件旧装备名；没有换下任何东西时为 null。 */
+  replacedName: string | null;
+}
+
+/** 分解回执。 */
+export interface SalvageEquipmentOutcome {
+  /** 装备二期：返还的玄铁（最小单位）。 */
+  xuantie: number;
+  count: number;
+  /** 返还的矿石（最小单位）。 */
+  ore: number;
+}
+
+/** 炼器解锁检查（只在服务端实现；未解锁时 forge 一律 INVALID_STATUS）。 */
+function requireForgeUnlocked(draft: SectDraft): void {
+  const reason = forgeUnlockBlockedReason(Number(draft.sect.level));
+  if (reason !== null) {
+    throw new AppError('INVALID_STATUS', reason);
+  }
+}
+
+/**
+ * 装备请求的部位 / 主属性校验（炼器与三期功勋兑换**共用**，避免两处各写一份，规则见计划 1.3）：
+ * 部位必须是 3 个合法装备格之一；法器**必须**选身法 / 幸运，其它部位**不许**传主属性。
+ * 返回收窄后的部位与解析好的主属性（法器缺省时按 resolveMainAttr 随机二选一）。
+ */
+function resolveRequestedEquipment(
+  slot: string | undefined,
+  mainAttr: string | undefined,
+): { slot: EquipmentSlot; mainAttr: EquipmentAttr } {
+  if (slot === undefined || !isEquipmentSlot(slot)) {
+    throw new AppError('VALIDATION_ERROR', '未知装备部位');
+  }
+  if (slot === 'artifact') {
+    if (mainAttr !== 'speed' && mainAttr !== 'luck') {
+      throw new AppError('VALIDATION_ERROR', '法器需要选择身法或幸运');
+    }
+  } else if (mainAttr !== undefined) {
+    throw new AppError('VALIDATION_ERROR', '该部位不需要选择主属性');
+  }
+  const resolved = resolveMainAttr(slot, mainAttr, Math.random);
+  if (resolved === null) {
+    // 上面的校验已经覆盖了所有非法组合，这里只是给类型收窄兜底。
+    throw new AppError('VALIDATION_ERROR', '主属性无效');
+  }
+  return { slot, mainAttr: resolved };
+}
+
+/** 本宗全部装备（背包 + 已穿戴）与背包件数；背包 = disciple_id IS NULL。 */
+async function loadEquipment(
+  db: D1Database,
+  sectId: string,
+): Promise<{ items: EquipmentRow[]; bagCount: number }> {
+  const repo = new EquipmentRepository(db);
+  const [items, bagCount] = await Promise.all([
+    repo.findBySectId(sectId),
+    repo.countBagBySectId(sectId),
+  ]);
+  return { items, bagCount };
+}
+
+/**
+ * 穿戴 / 卸下 / 转移后的收尾：写回库里的 5 个冗余列，**同时把内存行也改成新值**。
+ *
+ * 库侧用 refreshDiscipleGearStatement 按装备表 SUM（计划 2.2：不在内存里做加减）；
+ * 内存侧用调用方算好的「改动后的装备行」算同一个和 —— 只为让随命令返回的 state 立刻带上
+ * 新加成与新战力，否则前端拿到的 state 会滞回旧值，弟子详情里的 (+x) 要等下一次 sync 才对。
+ */
+function applyGearRefresh(
+  draft: SectDraft,
+  discipleId: string,
+  items: readonly EquipmentRow[],
+): void {
+  draft.addStatement(refreshDiscipleGearStatement(discipleId));
+  const row = draft.disciples.find((item) => item.id === discipleId);
+  if (row === undefined) {
+    return;
+  }
+  const worn = items.filter((item) => item.disciple_id === discipleId);
+  const gear = gearBonusOf(worn);
+  row.gear_attack = gear.attack;
+  row.gear_defense = gear.defense;
+  row.gear_speed = gear.speed;
+  row.gear_luck = gear.luck;
+  row.gear_physique = gear.physique;
+  row.gear_power_bp = gearPowerBonusBpOf(worn);
+}
+
+/**
+ * 炼器（POST /game/forge-equipment，计划 1.3）：结算 → 解锁 / 部位 / 主属性 / 背包 / 资源校验
+ * → 扣资源 + 往背包里加一件**凡品**装备，只做**一次**受保护 batch。
+ *
+ * 一期只能炼凡品且必定成功（品质不随机）；法器必须给身法 / 幸运，其它部位不许给主属性；
+ * 背包满（50 件，见 1.5）时不能炼器。
+ */
+export async function forgeEquipment(
+  db: D1Database,
+  userId: string,
+  slot: string,
+  mainAttr: string | undefined,
+  now: number,
+  quality: string = FORGE_QUALITY,
+): Promise<{ state: SectStateView; outcome: ForgeEquipmentOutcome }> {
+  const draft = await draftFor(db, userId, now);
+  requireForgeUnlocked(draft);
+  // 装备二期：品质由玩家选（不随机），但不能超过炼器坊等级允许的品质。
+  const recipe = forgeRecipeOf(quality);
+  if (recipe === undefined) {
+    throw new AppError('VALIDATION_ERROR', '未知装备品质');
+  }
+  const workshopLevel = draft.buildings.find((row) => row.def_id === FORGE_WORKSHOP_ID)?.level ?? 1;
+  if (workshopLevel < recipe.workshopLevel) {
+    throw new AppError(
+      'INVALID_STATUS',
+      `炼${qualityNameOf(recipe.quality)}需要炼器坊 ${String(recipe.workshopLevel)} 级`,
+    );
+  }
+  // 计划 1.3：部位由玩家选；法器**必须**选身法 / 幸运，其它部位**不许**给主属性（与功勋兑换共用）。
+  const requested = resolveRequestedEquipment(slot, mainAttr);
+  const { bagCount } = await loadEquipment(db, draft.sect.id);
+  if (bagCount >= BAG_CAPACITY) {
+    throw new AppError('INVALID_STATUS', bagFullReason(bagCount));
+  }
+  for (const [resourceId, amount] of Object.entries(recipe.cost)) {
+    draft.requireResource(resourceId, Number(amount));
+  }
+
+  // 装备二期：先判定成功 / 降级 / 失败（永远不会高于所选品质）。
+  const result = rollForgeResult(forgeOddsOf(recipe.quality, workshopLevel), Math.random);
+  if (result === 'fail') {
+    const refund = forgeFailRefund(recipe.cost);
+    for (const [resourceId, amount] of Object.entries(refund)) {
+      draft.addResource(resourceId, amount);
+    }
+    await draft.commit();
+    return {
+      state: draft.view(),
+      outcome: {
+        result,
+        equipmentId: null,
+        name: null,
+        slot,
+        slotName: slotNameOf(slot),
+        quality: null,
+        refund,
+        cost: { ...recipe.cost },
+      },
+    };
+  }
+
+  const generated = generateEquipment({
+    slot: requested.slot,
+    quality: result === 'downgrade' ? lowerQuality(recipe.quality) : recipe.quality,
+    mainAttr: requested.mainAttr,
+    random: Math.random,
+  });
+  const equipmentId = crypto.randomUUID();
+  draft.addStatement(
+    insertEquipmentStatement({
+      id: equipmentId,
+      sectId: draft.sect.id,
+      slot: generated.slot,
+      quality: generated.quality,
+      name: generated.name,
+      mainAttr: generated.mainAttr,
+      mainValue: generated.mainValue,
+      subAttr: generated.subAttr,
+      subValue: generated.subValue,
+      source: 'forge',
+      now,
+    }),
+  );
+  await draft.commit();
+  if (generated.quality === 'immortal') {
+    await broadcastWorldBoss(db, `【炼器】${draft.sect.name}炼成 ${generated.name}！`, now);
+  }
+  return {
+    state: draft.view(),
+    outcome: {
+      result,
+      equipmentId,
+      name: generated.name,
+      slot: generated.slot,
+      slotName: slotNameOf(generated.slot),
+      quality: generated.quality,
+      refund: {},
+      cost: { ...recipe.cost },
+    },
+  };
+}
+
+/**
+ * 穿戴（POST /game/equip，计划 1.5）。
+ *
+ * - 把一件装备穿到某弟子对应部位，该部位原有装备自动放回背包（一换一 → 背包满也能换装）；
+ * - 可以直接把 A 弟子身上的装备穿给 B 弟子（先卸下再穿上，A 的该部位变空）；
+ * - 目标弟子与（装备原本穿在别人身上时的）原归属弟子都要通过 requireNotAway：
+ *   在外历练 / 重伤卧床期间既不能穿、也不能把身上的装备给别人；
+ * - 装备行改动与两名弟子的 gear 列写回在**同一个 batch**，且先改归属、再按装备表重新求和。
+ */
+export async function equipItem(
+  db: D1Database,
+  userId: string,
+  equipmentId: string,
+  discipleId: string,
+  now: number,
+): Promise<{ state: SectStateView; outcome: EquipChangeOutcome }> {
+  const draft = await draftFor(db, userId, now);
+  const target = draft.discipleById(discipleId);
+  requireNotAway(draft, target, '穿戴装备');
+
+  const { items } = await loadEquipment(db, draft.sect.id);
+  const item = items.find((row) => row.id === equipmentId);
+  if (item === undefined) {
+    throw new AppError('NOT_FOUND', '装备不存在');
+  }
+  if (item.disciple_id === target.id) {
+    throw new AppError('INVALID_STATUS', `${target.name}已经穿着这件装备`);
+  }
+  const previousHolder = item.disciple_id === null ? null : draft.discipleById(item.disciple_id);
+  if (previousHolder !== null) {
+    requireNotAway(draft, previousHolder, '取下装备');
+  }
+  const replaced =
+    items.find((row) => row.disciple_id === target.id && row.slot === item.slot) ?? null;
+
+  // 内存里同步改归属：随命令返回的 state 立刻带上新加成（库里的 SUM 在同一批写回）。
+  const nextItems = items.map((row) => {
+    if (row.id === item.id) return { ...row, disciple_id: target.id };
+    if (replaced !== null && row.id === replaced.id) return { ...row, disciple_id: null };
+    return row;
+  });
+  if (replaced !== null) {
+    draft.addStatement(updateEquipmentHolderStatement(replaced.id, draft.sect.id, null));
+  }
+  draft.addStatement(updateEquipmentHolderStatement(item.id, draft.sect.id, target.id));
+  applyGearRefresh(draft, target.id, nextItems);
+  if (previousHolder !== null) {
+    applyGearRefresh(draft, previousHolder.id, nextItems);
+  }
+
+  await draft.commitDisciple(
+    previousHolder === null ? [{ id: target.id }] : [{ id: target.id }, { id: previousHolder.id }],
+    undefined,
+    {
+      equipmentItems: [
+        { id: item.id, discipleId: item.disciple_id },
+        ...(replaced === null
+          ? []
+          : [{ id: replaced.id, discipleId: replaced.disciple_id }]),
+      ],
+    },
+  );
+  return {
+    state: draft.view(),
+    outcome: {
+      equipmentId: item.id,
+      name: item.name,
+      slot: item.slot,
+      slotName: slotNameOf(item.slot),
+      discipleId: target.id,
+      discipleName: target.name,
+      replacedName: replaced?.name ?? null,
+    },
+  };
+}
+
+/**
+ * 卸下（POST /game/unequip，计划 1.5）：放回背包；**背包已满时拒绝**（提示先分解）。
+ * 在外历练 / 重伤卧床的弟子不能卸下（沿用 requireNotAway）。
+ */
+export async function unequipItem(
+  db: D1Database,
+  userId: string,
+  equipmentId: string,
+  now: number,
+): Promise<{ state: SectStateView; outcome: EquipChangeOutcome }> {
+  const draft = await draftFor(db, userId, now);
+  const { items, bagCount } = await loadEquipment(db, draft.sect.id);
+  const item = items.find((row) => row.id === equipmentId);
+  if (item === undefined) {
+    throw new AppError('NOT_FOUND', '装备不存在');
+  }
+  if (item.disciple_id === null) {
+    throw new AppError('INVALID_STATUS', '这件装备本来就在背包里');
+  }
+  const holder = draft.discipleById(item.disciple_id);
+  requireNotAway(draft, holder, '卸下装备');
+  if (bagCount >= BAG_CAPACITY) {
+    throw new AppError('INVALID_STATUS', bagFullReason(bagCount));
+  }
+
+  // 内存里同步改归属：随命令返回的 state 立刻是不含这件装备的加成。
+  const nextItems = items.map((row) =>
+    row.id === item.id ? { ...row, disciple_id: null } : row,
+  );
+  draft.addStatement(updateEquipmentHolderStatement(item.id, draft.sect.id, null));
+  applyGearRefresh(draft, holder.id, nextItems);
+  await draft.commitDisciple([{ id: holder.id }], undefined, {
+    equipmentItems: [{ id: item.id, discipleId: item.disciple_id }],
+  });
+  return {
+    state: draft.view(),
+    outcome: {
+      equipmentId: item.id,
+      name: item.name,
+      slot: item.slot,
+      slotName: slotNameOf(item.slot),
+      discipleId: null,
+      discipleName: null,
+      replacedName: null,
+    },
+  };
+}
+
+/**
+ * 分解（POST /game/salvage-equipment，计划 1.5）：只能分解**背包里**的装备
+ * （穿在身上的不能分解，提示先卸下），按品质表返还矿石；一次 1~50 件，服务端去重。
+ * 删除语句与返还的矿石在同一 batch，装备行也进守卫。
+ */
+export async function salvageEquipment(
+  db: D1Database,
+  userId: string,
+  equipmentIds: readonly string[],
+  now: number,
+): Promise<{ state: SectStateView; outcome: SalvageEquipmentOutcome }> {
+  const draft = await draftFor(db, userId, now);
+  const ids = [...new Set(equipmentIds)];
+  const { items } = await loadEquipment(db, draft.sect.id);
+  const byId = new Map(items.map((row) => [row.id, row]));
+  const chosen: EquipmentRow[] = [];
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (row === undefined) {
+      throw new AppError('NOT_FOUND', '装备不存在');
+    }
+    if (row.disciple_id !== null) {
+      throw new AppError('INVALID_STATUS', `${row.name}穿在身上，请先卸下再分解`);
+    }
+    chosen.push(row);
+  }
+
+  let ore = 0;
+  let xuantie = 0;
+  for (const row of chosen) {
+    draft.addStatement(deleteBagEquipmentStatement(row.id, draft.sect.id));
+    ore += isEquipmentQuality(row.quality) ? salvageOreUnits(row.quality) : 0;
+    xuantie += isEquipmentQuality(row.quality) ? salvageXuantieUnits(row.quality) : 0;
+  }
+  if (ore > 0) {
+    draft.addResource('ore', ore);
+  }
+  if (xuantie > 0) {
+    draft.addResource(XUANTIE_RESOURCE_ID, xuantie);
+  }
+  await draft.commit({
+    equipmentItems: chosen.map((row) => ({ id: row.id, discipleId: row.disciple_id })),
+  });
+  return { state: draft.view(), outcome: { count: chosen.length, ore, xuantie } };
+}
+
+/**
+ * GET /game/equipment：装备面板（顺带结算并返回 state）。
+ * 装备明细**不进** /game/sync（额度考虑），只有这个接口返回。
+ */
+export async function getEquipment(
+  db: D1Database,
+  userId: string,
+  now: number,
+): Promise<{ state: SectStateView; equipment: EquipmentView }> {
+  const draft = await draftFor(db, userId, now);
+  const { items, bagCount } = await loadEquipment(db, draft.sect.id);
+  const discipleNames = new Map(draft.disciples.map((row) => [row.id, row.name]));
+  return {
+    state: draft.view(),
+    equipment: buildEquipmentView({
+      sectLevel: Number(draft.sect.level),
+      workshopLevel: draft.buildings.find((row) => row.def_id === FORGE_WORKSHOP_ID)?.level ?? 1,
+      items,
+      bagCount,
+      discipleNames,
+    }),
   };
 }
 
@@ -4028,14 +5207,51 @@ export async function usePill(
  * 进守擂阵容 / 驱逐都不能做。已归队待领取（status = 'ready'）的弟子已在外归来，
  * 可以正常工作与操作，只是不能再次出发、也不能被驱逐（见 requireJourneySettled）。
  *
+ * 二期阶段一：重伤卧床（severe_injured_until > now）与在外历练同样被挡住。
+ *
  * 保存私有备注不在限制之列（计划 2.3 明确允许）。
  */
 function requireNotAway(draft: SectDraft, disciple: DiscipleRow, action: string): void {
+  const blocker = unavailableBlocker(draft, disciple, action);
+  if (blocker !== null) throw blocker.error;
+}
+
+/** requireNotAway 的判定版：不在外返回 null；批量命令据此把在外弟子记为跳过而不是整批报错。 */
+function awayBlocker(draft: SectDraft, disciple: DiscipleRow, action: string): DiscipleBlocker | null {
   const pending = draft.pendingJourneyOf(disciple.id);
   if (pending === undefined || journeyStatusOf(pending, draft.now) !== 'active') {
-    return;
+    return null;
   }
-  throw new AppError('INVALID_STATUS', `${disciple.name}正在外历练，尚未归队，无法${action}`);
+  return {
+    error: new AppError('INVALID_STATUS', `${disciple.name}正在外历练，尚未归队，无法${action}`),
+    reason: '外出历练中',
+  };
+}
+
+/** 二期阶段一：重伤卧床的弟子做不了任何要亲自出手的事。 */
+function severeInjuryBlocker(draft: SectDraft, disciple: DiscipleRow): DiscipleBlocker | null {
+  const until = disciple.severe_injured_until === null ? null : Number(disciple.severe_injured_until);
+  if (!isSeverelyInjured(until, draft.now)) {
+    return null;
+  }
+  return {
+    error: new AppError(
+      'INVALID_STATUS',
+      `${disciple.name}重伤卧床，还需静养${severeInjuryLeftText(until ?? 0, draft.now)}`,
+    ),
+    reason: '重伤卧床',
+  };
+}
+
+/** 统一的「不能出战」拦截：先看在野、再看重伤（单个命令抛错，批量命令据此把弟子记为跳过）。 */
+function unavailableBlocker(
+  draft: SectDraft,
+  disciple: DiscipleRow,
+  action: string,
+): DiscipleBlocker | null {
+  const away = awayBlocker(draft, disciple, action);
+  if (away !== null) return away;
+  return severeInjuryBlocker(draft, disciple);
 }
 
 /**
@@ -4067,6 +5283,13 @@ function journeyEligibilityOf(input: {
   now: number;
 }): JourneyBlock | null {
   const awayIds = journeyAwayIds(input.journeys, input.now);
+  // 二期阶段一：重伤卧床期间不能外出历练（比疗伤更重：整个静养期都动不了）。
+  if (isSeverelyInjured(input.disciple.severe_injured_until, input.now)) {
+    return {
+      code: 'INVALID_STATUS',
+      message: `${input.disciple.name}重伤卧床，还需静养${severeInjuryLeftText(Number(input.disciple.severe_injured_until), input.now)}`,
+    };
+  }
   // 0015：秘境探索中的弟子不能被派出去历练 —— 否则这支探索队伍会被抽走一个成员。
   if (explorationPartyIds(input.activeExploration).includes(input.disciple.id)) {
     return {
@@ -4100,6 +5323,9 @@ function journeyEligibilityOf(input: {
 /**
  * 计算奖励快照所需的弟子属性子集（出发时一次性快照，之后不再重算）。
  * luck / physique 是 0016 新增的两项：预览与出发读同一份值，出发之后改属性也不影响已锁定的结果。
+ *
+ * 0028 装备：这里给的是**基础属性**（弟子表上的原始值），历练不计入装备（计划 1.2 明列）；
+ * 也正因为是出发时的快照，途中换装不会改变已出发那一趟的结果。
  */
 function journeyRewardInputOf(disciple: DiscipleRow): {
   realmId: string;
@@ -4463,6 +5689,11 @@ function readStringVar(value: unknown): string | undefined {
 /** 交互式秘境探索总开关（未显式开启时前端只显示「速通」）。 */
 export function realmExploreEnabled(env: Env): boolean {
   return readStringVar(env.REALM_EXPLORE_ENABLED) === 'true';
+}
+
+/** 讨伐每日出手上限（环境变量 WORLD_BOSS_DAILY_ATTACK_LIMIT；没配 / 写错用默认 120，0 = 不限）。 */
+export function worldBossDailyAttackLimit(env: Env): number {
+  return parseDailyAttackLimit(readStringVar(env.WORLD_BOSS_DAILY_ATTACK_LIMIT));
 }
 
 /** 把入库的遭遇 JSON 还原成视图；脏数据返回 null（不让一条坏记录卡死整个 sync）。 */
@@ -4984,15 +6215,20 @@ export async function chooseRealmExplore(
   }
   const partyIds = explorationPartyIds(row);
   const party = preflight.disciples.filter((disciple) => partyIds.includes(disciple.id));
+  // 0028 装备：交互式秘境（realm-explore/choose）计入装备 —— 判定用的战力含装备加成。
   const power = partyCombatPower(
-    party.map((disciple) => ({
-      realmId: disciple.realm_id,
-      stage: Number(disciple.stage),
-      attack: Number(disciple.attack),
-      defense: Number(disciple.defense),
-      speed: Number(disciple.speed),
-      talent: disciple.talent,
-    })),
+    party.map((disciple) => {
+      const attrs = battleAttrsOf(disciple);
+      return {
+        realmId: disciple.realm_id,
+        stage: Number(disciple.stage),
+        attack: attrs.attack,
+        defense: attrs.defense,
+        speed: attrs.speed,
+        talent: disciple.talent,
+        gearPowerBonusBp: gearPowerBonusBpOfDisciple(disciple),
+      };
+    }),
   );
   const arenaLevel =
     preflight.buildings.find((building) => building.def_id === ARENA_BUILDING_ID)?.level ?? 0;
@@ -5054,6 +6290,15 @@ export async function chooseRealmExplore(
     } else {
       usedIds = [...usedIds, next.id];
       nextEncounter = encounterJsonOf(next);
+    }
+  }
+
+  // 装备二期：高级秘境通关时低概率掉玄铁（只进本次发放，不写进中段账本）。
+  if (status === 'completed') {
+    const xuantie = realmXuantieDrop(realm.id, Math.random) * 1000;
+    if (xuantie > 0) {
+      payout = { ...payout, [XUANTIE_RESOURCE_ID]: (payout[XUANTIE_RESOURCE_ID] ?? 0) + xuantie };
+      finalRewards = payout;
     }
   }
 
@@ -5203,7 +6448,11 @@ function attributeFloorOf(attribute: BettableAttribute): number {
   return attribute === 'luck' || attribute === 'physique' ? 1 : 0;
 }
 
-/** 弟子六项属性快照（jev 状态文本与侦查文案共用）。 */
+/**
+ * 弟子六项属性快照（jev 状态文本与侦查文案共用）。
+ *
+ * 0028 装备：论道赌局**不计入装备**（计划 1.2 明列）—— 这里给的是基础属性。
+ */
 function debateAttributesOf(disciple: DiscipleRow): Record<BettableAttribute, number> {
   return {
     attack: Number(disciple.attack),
@@ -5322,7 +6571,7 @@ type DebatePlan =
 /** 写入 dao_debate_log.reward_detail 的 JSON（'none' = 败北无奖励）。 */
 type DebateRewardDetail =
   | { type: 'resource'; resourceId: string; amount: string }
-  | { type: 'insight'; insight: number }
+  | { type: 'insight'; insight: number; overflowStone?: string }
   | { type: 'none' };
 
 /**
@@ -5437,6 +6686,36 @@ export async function daoDebate(
     };
   }
 
+  const insightRoom = daoInsightRoom(Number(disciple.dao_insight), Number(disciple.dao_insight_used));
+  const winsInsight =
+    plan.mode === 'attribute' || (plan.mode === 'preset_spirit_stone' && plan.rewardType === 'insight');
+  if (winsInsight && insightRoom <= 0) {
+    throw new AppError(
+      'INVALID_STATUS',
+      `${disciple.name}的悟道值已满（已分配 ${String(Number(disciple.dao_insight_used))} + 未分配 ${String(Number(disciple.dao_insight))}，上限 ${String(DAO_INSIGHT_CAP)}），请改选灵石奖励`,
+    );
+  }
+
+  /** 发悟道值：超出剩余额度的部分按 DAO_INSIGHT_OVERFLOW_STONE 折成灵石。 */
+  const grantInsight = (reward: number): { detail: DebateRewardDetail; description: string } => {
+    const gain = Math.min(reward, insightRoom);
+    const overflow = reward - gain;
+    const nextInsight = Number(disciple.dao_insight) + gain;
+    disciple.dao_insight = nextInsight;
+    draft.addStatement(
+      updateDiscipleDaoInsightStatement(disciple.id, nextInsight, Number(disciple.dao_insight_used)),
+    );
+    if (overflow <= 0) {
+      return { detail: { type: 'insight', insight: gain }, description: `悟道值 +${String(gain)}` };
+    }
+    const stone = overflow * DAO_INSIGHT_OVERFLOW_STONE;
+    draft.grantResource('spiritStone', stone);
+    return {
+      detail: { type: 'insight', insight: gain, overflowStone: String(stone) },
+      description: `悟道值 +${String(gain)}（溢出 ${String(overflow)} 点折合灵石 +${displayAmount(stone)}）`,
+    };
+  };
+
   const attrs = debateAttributesOf(disciple);
   const revealHints = generateRevealHints(attrs, multiplier, Number(disciple.luck));
   const opponent = generateOpponentAttrs(attrs, multiplier);
@@ -5450,28 +6729,18 @@ export async function daoDebate(
   let rewardDescription: string;
   if (result === 'win') {
     if (plan.mode === 'preset_spirit_stone' && plan.rewardType === 'insight') {
-      const gain = PRESET_INSIGHT_REWARDS[multiplier];
-      const nextInsight = Number(disciple.dao_insight) + gain;
-      disciple.dao_insight = nextInsight;
-      draft.addStatement(
-        updateDiscipleDaoInsightStatement(disciple.id, nextInsight, Number(disciple.dao_insight_used)),
-      );
-      rewardDetail = { type: 'insight', insight: gain };
-      rewardDescription = `悟道值 +${String(gain)}`;
+      const granted = grantInsight(PRESET_INSIGHT_REWARDS[multiplier]);
+      rewardDetail = granted.detail;
+      rewardDescription = granted.description;
     } else if (plan.mode === 'free_resource') {
       const gain = freeBetReward(plan.amount, multiplier);
       draft.grantResource(plan.resourceId, gain);
       rewardDetail = { type: 'resource', resourceId: plan.resourceId, amount: String(gain) };
       rewardDescription = `${draft.resourceName(plan.resourceId)} +${displayAmount(gain)}`;
     } else if (plan.mode === 'attribute') {
-      const gain = ATTRIBUTE_INSIGHT_REWARDS[multiplier];
-      const nextInsight = Number(disciple.dao_insight) + gain;
-      disciple.dao_insight = nextInsight;
-      draft.addStatement(
-        updateDiscipleDaoInsightStatement(disciple.id, nextInsight, Number(disciple.dao_insight_used)),
-      );
-      rewardDetail = { type: 'insight', insight: gain };
-      rewardDescription = `悟道值 +${String(gain)}`;
+      const granted = grantInsight(ATTRIBUTE_INSIGHT_REWARDS[multiplier]);
+      rewardDetail = granted.detail;
+      rewardDescription = granted.description;
     } else {
       // 模式 A + 灵石奖励。
       const gain = PRESET_RESOURCE_REWARDS[multiplier];
@@ -6215,6 +7484,1214 @@ class ParamRepository2 {
     const result = await stmt.all<T>();
     return result.results ?? [];
   }
+}
+
+/* ---------- 0025/0027 世界 Boss（讨伐，二期） ---------- */
+
+/** 合格宗门的兜底窗口：最近 3 天结算过的宗门（没有任何出手记录时用，且一轮伤害 ×0.5）。 */
+const WORLD_BOSS_ACTIVE_SECT_MS = 3 * 86_400_000;
+/** 「合格宗门」按出手记录判定时回看的天数。 */
+const WORLD_BOSS_HIT_SECT_DAYS = 3;
+/** 面板里展示的出手记录条数。 */
+const WORLD_BOSS_HIT_FEED_LIMIT = 20;
+/** 疲劳记录保留时长（Cron 顺带清理，防表无限增长）。 */
+const WORLD_BOSS_BATTLE_RETENTION_MS = 2 * 86_400_000;
+
+/**
+ * 全服广播：失败不影响主流程（与灵兽竞逐同一处理）。
+ * Workers 不等未完成的 Promise，所以每处都必须 await。
+ */
+async function broadcastWorldBoss(db: D1Database, content: string, now: number): Promise<void> {
+  try {
+    await broadcastSystemMessage(db, content, now);
+  } catch {
+    /* 广播失败不影响主流程 */
+  }
+}
+
+/**
+ * 某个宗门当前的每小时产出（最小单位）：与 view.ts 的 resourceRatesNow 同一口径
+ * —— 仍在外的弟子不贡献产出，建筑等级表只用 `def_id → level`。
+ */
+function resourceRatesOfSect(input: {
+  config: GameConfigContent;
+  disciples: readonly DiscipleRow[];
+  buildings: readonly BuildingRow[];
+  journeys: readonly DiscipleJourneyRow[];
+  now: number;
+}): Map<string, number> {
+  const awayIds = journeyAwayIds(input.journeys, input.now);
+  return resourceRates(
+    input.config,
+    input.disciples
+      .filter((disciple) => !awayIds.has(disciple.id))
+      .map((disciple) => ({
+        id: disciple.id,
+        aptitude: Number(disciple.aptitude),
+        realmId: disciple.realm_id,
+        stage: Number(disciple.stage),
+        cultivation: Number(disciple.cultivation),
+        cultivationRemainder: Number(disciple.cultivation_remainder),
+        assignment: disciple.assignment,
+        talent: disciple.talent,
+      })),
+    Object.fromEntries(input.buildings.map((building) => [building.def_id, building.level])),
+  );
+}
+
+function ratesRecordOf(rates: Map<string, number>): Record<string, number> {
+  const record: Record<string, number> = {};
+  for (const [resourceId, amount] of rates) {
+    record[resourceId] = amount;
+  }
+  return record;
+}
+
+/**
+ * 此刻能不能出手（sync 的按钮角标用）：不在开放时段直接返回 false，连查询都不做；
+ * 二期不限次数，所以只看「今天有没有仍然 active 的关卡」这一条走索引的查询。
+ */
+async function worldBossAttackableFor(db: D1Database, now: number): Promise<boolean> {
+  if (!isWorldBossAttackable(worldBossPhaseOf(now))) return false;
+  const boss = await new WorldBossRepository(db).findLatestByDayKey(dateKeyUtc8(now));
+  return boss !== null && boss.status === 'active';
+}
+
+/** 词缀视图（'none' = 迁移过来的旧行，没有词缀）。 */
+function worldBossAffixViewOf(affixId: string): WorldBossAffixView {
+  const affix = findAffix(affixId);
+  if (affix === undefined) {
+    return {
+      id: WORLD_BOSS_AFFIX_NONE,
+      name: '无',
+      effect: '本关没有词缀',
+      tip: '正常配队即可',
+      sortAttribute: 'attack',
+    };
+  }
+  return {
+    id: affix.id,
+    name: affix.name,
+    effect: affix.effect,
+    tip: affix.tip,
+    sortAttribute: affix.sortAttribute,
+  };
+}
+
+function worldBossDefViewOf(bossIndex: number, stage: number): WorldBossDefView {
+  const def = bossDefAt(bossIndex);
+  return {
+    index: def.index,
+    name: def.name,
+    displayName: bossDisplayName(bossIndex, stage),
+    sealCharacter: def.sealCharacter,
+    color: def.color,
+    description: def.description,
+  };
+}
+
+function toWorldBossHitView(row: WorldBossHitRow): WorldBossHitView {
+  return {
+    sectId: row.sect_id,
+    sectName: row.sect_name,
+    discipleNames: stringArrayOf(row.disciple_names),
+    injuredNames: stringArrayOf(row.injured_names),
+    severeNames: stringArrayOf(row.severe_names),
+    damage: Number(row.damage),
+    isCrit: Number(row.is_crit) === 1,
+    isLastHit: Number(row.is_last_hit) === 1,
+    createdAt: Number(row.created_at),
+  };
+}
+
+/**
+ * 三期：本宗门在当前关的掉落概率（boss 为 null 时为 null）。
+ * 伤害占比 = 本宗门对该关的伤害 / 所有参与宗门之和（和为 0 或还没出手时为 0）。
+ */
+function myDropView(input: {
+  boss: WorldBossCurrentView | null;
+  rankRows: WorldBossSectDamageRow[];
+  sectId: string;
+}): WorldBossView['myDrop'] {
+  if (input.boss === null) return null;
+  const total = input.rankRows.reduce((sum, row) => sum + Number(row.damage), 0);
+  const mine = Number(input.rankRows.find((row) => row.sect_id === input.sectId)?.damage ?? 0);
+  const damageShare = total > 0 ? mine / total : 0;
+  const { top, others } = bossDropQualities(input.boss.stage);
+  return {
+    damageShare,
+    highChance: bossHighDropChance(damageShare),
+    highQualityName: qualityNameOf(top),
+    lowQualityName: qualityNameOf(others),
+  };
+}
+
+/**
+ * 讨伐面板（GET /game/world-boss 与出手后的返回共用同一份装配）。
+ * 只读：当前关卡、今日已连斩、史上最高单日关数、冷却、疲劳表、伤害榜、最近 20 条、史上最强一击。
+ */
+async function buildWorldBossView(input: {
+  db: D1Database;
+  sectId: string;
+  now: number;
+  /** 奖励预览要用的本宗门产出与等级（不传则不出预览）。 */
+  rewardContext?: { rates: Record<string, number>; sectLevel: number };
+  /** 已经读到的关卡行（出手后传刚读回来的那一行，省一次查询）。 */
+  boss?: WorldBossRow | null;
+  /** 每日出手上限（0 = 不限），由路由按环境变量传入。 */
+  dailyAttackLimit: number;
+}): Promise<WorldBossView> {
+  const repo = new WorldBossRepository(input.db);
+  const { now } = input;
+  const phase = worldBossPhaseOf(now);
+  const dayKey = dateKeyUtc8(now);
+  const boss = input.boss === undefined ? await repo.findLatestByDayKey(dayKey) : input.boss;
+
+  const todayStart = dayStartMs(now);
+  const closesAt = todayStart + WORLD_BOSS_CLOSE_HOUR * 3_600_000;
+  // 「08:00 降临」提示：今天还没到 08:00 就是今天，否则是明天。
+  const opensAt =
+    phase === 'before'
+      ? todayStart + WORLD_BOSS_OPEN_HOUR * 3_600_000
+      : todayStart + 86_400_000 + WORLD_BOSS_OPEN_HOUR * 3_600_000;
+  const remainingSeconds = now >= closesAt ? 0 : Math.max(0, Math.ceil((closesAt - now) / 1000));
+
+  // 冷却：该宗门最近一条出手记录 + 3 秒（走 (sect_id, created_at DESC) 索引）。
+  const lastHitAt = await repo.lastHitAtBySect(input.sectId);
+  const cooldownSeconds =
+    lastHitAt === null
+      ? 0
+      : Math.max(0, Math.ceil((lastHitAt + WORLD_BOSS_COOLDOWN_MS - now) / 1000));
+
+  // 疲劳表：本宗门弟子最近 60 分钟内的出战次数。
+  const fatigueRows = await repo.fatigueCountsBySect(input.sectId, now - WORLD_BOSS_FATIGUE_WINDOW_MS);
+  const fatigue: Record<string, number> = {};
+  // 每次出战的时间（升序）：前端据此算「冒进冷却」—— 同一次查询顺带取出，不多查。
+  const fatigueTimes: Record<string, number[]> = {};
+  for (const row of fatigueRows) {
+    fatigue[row.disciple_id] = Number(row.cnt);
+    fatigueTimes[row.disciple_id] = (row.times ?? '')
+      .split(',')
+      .map(Number)
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .sort((a, b) => a - b);
+  }
+
+  const bossAttackable = boss !== null && boss.status === 'active' && isWorldBossAttackable(phase);
+
+  const rankPromise: Promise<WorldBossSectDamageRow[]> =
+    boss === null ? Promise.resolve([]) : repo.sectDamageRows(boss.id);
+  const hitPromise: Promise<WorldBossHitRow[]> =
+    boss === null ? Promise.resolve([]) : repo.recentHitsByBoss(boss.id, WORLD_BOSS_HIT_FEED_LIMIT);
+  const [rankRows, hitRows, topRow, killedToday, bestStage, attacksToday] = await Promise.all([
+    rankPromise,
+    hitPromise,
+    repo.topHit(),
+    repo.countKilledByDayKey(dayKey),
+    repo.maxKilledStage(),
+    repo.countHitsBySectSince(input.sectId, todayStart),
+  ]);
+  const limitReached = input.dailyAttackLimit > 0 && attacksToday >= input.dailyAttackLimit;
+
+  const ranks: WorldBossRankView[] = rankRows.map((row, index) => ({
+    sectId: row.sect_id,
+    sectName: row.sect_name,
+    damage: Number(row.damage),
+    attempts: Number(row.attempts),
+    isTopDamage: index === 0,
+    isLastHit: Number(row.last_hit) === 1,
+    isMe: row.sect_id === input.sectId,
+  }));
+
+  const bossView: WorldBossCurrentView | null =
+    boss === null
+      ? null
+      : {
+          id: boss.id,
+          dayKey: boss.day_key,
+          stage: Number(boss.stage),
+          def: worldBossDefViewOf(Number(boss.boss_index), Number(boss.stage)),
+          affix: worldBossAffixViewOf(boss.affix),
+          maxHp: Number(boss.max_hp),
+          hp: Number(boss.hp),
+          status:
+            boss.status === 'killed' ? 'killed' : boss.status === 'fled' ? 'fled' : 'active',
+          phase,
+          // 最后一击的宗门名直接从榜单里取（出手记录冗余了宗门名，不用再读 sects）。
+          killerSectName: ranks.find((rank) => rank.isLastHit)?.sectName ?? null,
+          fledOutcome:
+            boss.status !== 'fled'
+              ? null
+              : isFledByDamage(Number(boss.max_hp), Number(boss.hp))
+                ? 'repelled'
+                : 'escaped',
+          endedAt: boss.ended_at === null ? null : Number(boss.ended_at),
+        };
+
+  return {
+    boss: bossView,
+    phase,
+    opensAt,
+    remainingSeconds,
+    killedToday,
+    bestStage,
+    cooldownSeconds,
+    fatigue,
+    fatigueTimes,
+    // 今日出手次数用满了也算「此刻不能出手」（面板按钮与 state 里的角标一起灭）。
+    attackable: bossAttackable && !limitReached,
+    attacksToday,
+    dailyAttackLimit: input.dailyAttackLimit,
+    ranks,
+    hits: hitRows.map(toWorldBossHitView),
+    topHit: topRow === null ? null : toWorldBossHitView(topRow),
+    // 三期：本宗门在当前关的掉落概率（面板与奖励说明都读它，前端不复制公式）。
+    myDrop: myDropView({ boss: bossView, rankRows, sectId: input.sectId }),
+    rewardPreview:
+      input.rewardContext === undefined
+        ? null
+        : withXuantiePreview(
+            worldBossRewardPreview({
+              ...input.rewardContext,
+              // 当前关已被打死（下一关还没生成）时，预览下一关的奖励。
+              stage: bossView === null ? 1 : bossView.status === 'killed' ? bossView.stage + 1 : bossView.stage,
+            }),
+          ),
+  };
+}
+
+/** 奖励预览补上本关的玄铁与功勋数量（与发奖同一套 bossXuantieFor / worldBossMeritFor）。 */
+function withXuantiePreview<T extends { stage: number }>(
+  preview: T,
+): T & {
+  xuantie: { top: number; others: number; minSharePercent: number; below: number };
+  meritFullShare: number;
+} {
+  return {
+    ...preview,
+    xuantie: {
+      top: bossXuantieFor({ stage: preview.stage, damageShare: 1, isTop: true, repelled: false }),
+      others: bossXuantieFor({ stage: preview.stage, damageShare: 1, isTop: false, repelled: false }),
+      minSharePercent: Math.round(BOSS_XUANTIE_MIN_SHARE * 100),
+      // 三期：占比不足门槛时的数量（计划 2.2：每关 1 个）。
+      below: 1,
+    },
+    // 三期：占比 100% 时的功勋（实际按 √占比 折算，保底 2）。
+    meritFullShare: worldBossMeritFor({ stage: preview.stage, damageShare: 1, repelled: false }),
+  };
+}
+
+/** 奖励预览的上下文：产出取自宗门视图（已排除在外 / 重伤弟子，与发奖同口径）。 */
+function worldBossRewardContext(state: SectStateView): { rates: Record<string, number>; sectLevel: number } {
+  const rates: Record<string, number> = {};
+  for (const resource of state.resources) rates[resource.id] = Number(resource.ratePerHour);
+  return { rates, sectLevel: Number(state.sect.level) };
+}
+
+/** GET /game/world-boss：讨伐面板（顺带结算并返回 state）。 */
+export async function getWorldBoss(
+  db: D1Database,
+  userId: string,
+  now: number,
+  dailyAttackLimit: number = WORLD_BOSS_DAILY_ATTACK_LIMIT_DEFAULT,
+): Promise<{ state: SectStateView; boss: WorldBossView }> {
+  const draft = await draftFor(db, userId, now);
+  const boss = await buildWorldBossView({
+    db,
+    sectId: draft.sect.id,
+    now,
+    rewardContext: worldBossRewardContext(draft.view()),
+    dailyAttackLimit,
+  });
+  // 面板已经算过「能不能出手」，顺手让 state 里的角标与它一致。
+  draft.worldBossAttackable = boss.attackable;
+  return { state: draft.view(), boss };
+}
+
+/**
+ * 生成第 stage 关：血量 = 一轮伤害 × 3 × 2^(stage−1)，词缀当场随机一个。
+ * `(day_key, stage)` 唯一 —— 并发或重复触发时插不进去，返回 null（调用方据此不广播）。
+ */
+async function spawnWorldBossStage(input: {
+  repo: WorldBossRepository;
+  now: number;
+  dayKey: string;
+  stage: number;
+  roundDamage: number;
+}): Promise<WorldBossRow | null> {
+  const bossIndex = bossIndexFor(dayIndexUtc8(input.now), input.stage);
+  const affix = rollAffix(Math.random);
+  const maxHp = stageMaxHp(input.roundDamage, input.stage);
+  const id = crypto.randomUUID();
+  const inserted = await input.repo.insertBossIfAbsent({
+    id,
+    dayKey: input.dayKey,
+    stage: input.stage,
+    bossIndex,
+    affix,
+    roundDamage: input.roundDamage,
+    maxHp,
+    now: input.now,
+  });
+  if (!inserted) return null;
+  return {
+    id,
+    day_key: input.dayKey,
+    stage: input.stage,
+    boss_index: bossIndex,
+    affix,
+    round_damage: input.roundDamage,
+    max_hp: maxHp,
+    hp: maxHp,
+    status: 'active',
+    killer_sect_id: null,
+    half_announced: 0,
+    rewarded_at: null,
+    created_at: input.now,
+    ended_at: null,
+  };
+}
+
+/**
+ * 一轮伤害（计划 2.3）：Σ 合格宗门的期望伤害。
+ *
+ * 合格宗门 = 最近 3 天在 world_boss_hits 里出过手的宗门；一个都没有时退化为
+ * 「最近 3 天结算过的宗门」，且一轮伤害 × 0.5。
+ * 每个宗门只取战力最高的 3 名（非在外、非重伤）弟子，按「无浮动 / 无暴击 / 无词缀 / 无力竭」算期望。
+ */
+async function worldBossRoundDamage(
+  db: D1Database,
+  repo: WorldBossRepository,
+  now: number,
+): Promise<number> {
+  const sinceDayKey = dateKeyUtc8(now - WORLD_BOSS_HIT_SECT_DAYS * 86_400_000);
+  const hitSectIds = await repo.sectsWithHitsSince(sinceDayKey);
+  const fallback = hitSectIds.length === 0;
+  const sects = fallback
+    ? await repo.activeSectsSince(now - WORLD_BOSS_ACTIVE_SECT_MS)
+    : hitSectIds.map((id) => ({ id }));
+
+  const discipleRepo = new DiscipleRepository(db);
+  const buildingRepo = new BuildingRepository(db);
+  const journeyRepo = new DiscipleJourneyRepository(db);
+  let total = 0;
+  for (const sect of sects) {
+    const [disciples, buildings, journeys] = await Promise.all([
+      discipleRepo.findBySectId(sect.id),
+      buildingRepo.findBySectId(sect.id),
+      journeyRepo.findOpenBySectId(sect.id),
+    ]);
+    const awayIds = journeyAwayIds(journeys, now);
+    const arenaLevel =
+      buildings.find((building) => building.def_id === ARENA_BUILDING_ID)?.level ?? 0;
+    // 0028 装备：这里是**关卡血量预估**（全服口径的基准值），**不计入装备** ——
+    // 计划 1.2 的「世界 Boss 计入装备」列的是战斗本身（一轮伤害 / 出手伤害 / 词缀属性 /
+    // 暴击幸运 / 受伤体魄）；血量预估含装备只会让 Boss 血量跟着涨、抵消装备收益。
+    const top3 = disciples
+      .filter(
+        (disciple) =>
+          !awayIds.has(disciple.id) && !isSeverelyInjured(disciple.severe_injured_until, now),
+      )
+      .map((disciple) =>
+        discipleCombatPower(
+          disciple.realm_id,
+          Number(disciple.stage),
+          Number(disciple.attack),
+          Number(disciple.defense),
+          Number(disciple.speed),
+          disciple.talent,
+        ),
+      )
+      .sort((a, b) => b - a)
+      .slice(0, WORLD_BOSS_MAX_PARTY);
+    total += expectedPartyDamage({
+      topPartyPower: top3.reduce((sum, power) => sum + power, 0),
+      arenaLevel,
+    });
+  }
+  // 兜底口径（没有任何宗门出过手）按计划的「×0.5」处理。
+  return fallback ? Math.floor(total * 0.5) : total;
+}
+
+/**
+ * POST /game/world-boss/attack：出手（讨伐）。
+ *
+ * 套路与其它命令一致：读快照（顺带结算）→ 全部只读校验（时段 / 关卡 / 冷却 / 弟子资格）
+ * → 逐人判定受伤与重伤 → 状态写回、疲劳记录、出手记录、扣血组装成**一次** `draft.commit()`。
+ * 提交之后再重新读一次关卡行，用库里的结果决定「击杀 → 立刻开下一关」以及
+ * 「半血 / 最强一击 / 重伤」这几条广播 —— 广播不参与事务。
+ */
+export async function attackWorldBoss(
+  db: D1Database,
+  userId: string,
+  input: { discipleIds: readonly string[] },
+  now: number,
+  dailyAttackLimit: number = WORLD_BOSS_DAILY_ATTACK_LIMIT_DEFAULT,
+): Promise<{ state: SectStateView; result: WorldBossAttackResultView; boss: WorldBossView }> {
+  const draft = await draftFor(db, userId, now);
+  const repo = new WorldBossRepository(db);
+  const phase = worldBossPhaseOf(now);
+
+  if (!isWorldBossAttackable(phase)) {
+    throw new AppError('INVALID_STATUS', '讨伐每日 08:00–23:00 开放（UTC+8）');
+  }
+
+  const dayKey = dateKeyUtc8(now);
+  const boss = await repo.findLatestByDayKey(dayKey);
+  if (boss === null) {
+    throw new AppError('NOT_FOUND', '妖王尚未降临（每日 08:00 现身）');
+  }
+  if (boss.status !== 'active') {
+    throw new AppError('INVALID_STATUS', '本关已经结束，请刷新面板');
+  }
+
+  // 冷却 3 秒：按该宗门最近一条出手记录算（跨关卡同样生效），拒绝时给出剩余秒数。
+  const lastHitAt = await repo.lastHitAtBySect(draft.sect.id);
+  if (lastHitAt !== null) {
+    const remainingMs = lastHitAt + WORLD_BOSS_COOLDOWN_MS - now;
+    if (remainingMs > 0) {
+      throw new AppError('COOLDOWN_ACTIVE', '出手太快，妖王还没缓过神', {
+        remainingSeconds: Math.ceil(remainingMs / 1000),
+      });
+    }
+  }
+
+  // 每日出手上限（防协议脚本全天刷；0 = 不限）：按 UTC+8 自然日数本宗门的出手记录。
+  if (dailyAttackLimit > 0) {
+    const attacksToday = await repo.countHitsBySectSince(draft.sect.id, dayStartMs(now));
+    if (attacksToday >= dailyAttackLimit) {
+      throw new AppError(
+        'DAILY_LIMIT',
+        `今日出手次数已达上限（${String(attacksToday)}/${String(dailyAttackLimit)}），明日再战`,
+        { attacksToday, dailyAttackLimit },
+      );
+    }
+  }
+
+  // 出战弟子：1~3 名、不重复、属于本宗、不在历练 / 疗伤 / 重伤中。
+  const discipleIds = [...new Set(input.discipleIds)];
+  if (discipleIds.length < WORLD_BOSS_MIN_PARTY || discipleIds.length > WORLD_BOSS_MAX_PARTY) {
+    throw new AppError(
+      'VALIDATION_ERROR',
+      `每次讨伐需派 ${String(WORLD_BOSS_MIN_PARTY)}~${String(WORLD_BOSS_MAX_PARTY)} 名弟子`,
+    );
+  }
+  const members = discipleIds.map((discipleId) => draft.discipleById(discipleId));
+  for (const member of members) {
+    requireNotAway(draft, member, '讨伐');
+    if (member.injured_until !== null && Number(member.injured_until) > now) {
+      throw new AppError('INVALID_STATUS', `${member.name}正在疗伤，无法讨伐`);
+    }
+  }
+
+  const affix = findAffix(boss.affix);
+  const berserk = affix?.id === 'berserk';
+  const frenzy = phase === 'frenzy';
+  const arenaLevel =
+    draft.buildings.find((building) => building.def_id === ARENA_BUILDING_ID)?.level ?? 0;
+
+  // 疲劳：每名弟子最近 60 分钟内已出战讨伐的次数（不含本次）。
+  const fatigueRows = await repo.fatigueCountsBySect(
+    draft.sect.id,
+    now - WORLD_BOSS_FATIGUE_WINDOW_MS,
+  );
+  const fatigueByDisciple = new Map(fatigueRows.map((row) => [row.disciple_id, Number(row.cnt)]));
+
+  // 逐人判定：先判重伤，未重伤再判受伤；被判重伤的那一刀不计入队伍伤害。
+  // 0028 装备：讨伐**计入装备** —— 伤害（战力 + 词缀属性加成）、暴击率用的幸运、
+  // 受伤 / 重伤判定用的体魄，全部用「基础属性 + 装备加成」（计划 1.2）。
+  const outcomes: WorldBossMemberOutcomeView[] = [];
+  const severeMembers: DiscipleRow[] = [];
+  const injuredMembers: DiscipleRow[] = [];
+  let partyBase = 0;
+  let luckSum = 0;
+  for (const member of members) {
+    const attrs = battleAttrsOf(member);
+    luckSum += attrs.luck;
+    const verdict = rollOutcome({
+      fatigueCount: fatigueByDisciple.get(member.id) ?? 0,
+      physique: attrs.physique,
+      berserk,
+      random: Math.random,
+    });
+    if (verdict.severe) {
+      severeMembers.push(member);
+      outcomes.push({ discipleId: member.id, discipleName: member.name, outcome: 'severe' });
+      continue;
+    }
+    if (verdict.injured) {
+      injuredMembers.push(member);
+      outcomes.push({ discipleId: member.id, discipleName: member.name, outcome: 'injured' });
+    } else {
+      outcomes.push({ discipleId: member.id, discipleName: member.name, outcome: 'normal' });
+    }
+    partyBase += discipleContribution(
+      discipleCombatPower(
+        member.realm_id,
+        Number(member.stage),
+        attrs.attack,
+        attrs.defense,
+        attrs.speed,
+        member.talent,
+        gearPowerBonusBpOfDisciple(member),
+      ),
+      affix,
+      {
+        attack: attrs.attack,
+        defense: attrs.defense,
+        speed: attrs.speed,
+      },
+    );
+  }
+
+  const { damage, crit } = rollDamage({
+    partyBase,
+    arenaLevel,
+    // 暴击率用「出战弟子」的幸运平均值（本次派出的全部成员，与计划 2.5 一致）。
+    avgLuck: members.length === 0 ? 0 : luckSum / members.length,
+    frenzy,
+    ...(affix?.id === 'eerie' ? { critRateMultiplier: 2 } : {}),
+    random: Math.random,
+  });
+  const actualDamage = Math.min(damage, Number(boss.hp));
+  const previousTopDamage = (await repo.topHit())?.damage ?? 0;
+
+  // 状态写回 + 疲劳记录 + 出手记录 + 扣血：全部挂在同一个 draft 上，只提交一次。
+  for (const member of severeMembers) {
+    const until = now + SEVERE_INJURY_MS;
+    draft.addStatement(setDiscipleSevereInjuryStatement(member.id, until));
+    const row = draft.disciples.find((item) => item.id === member.id);
+    if (row !== undefined) row.severe_injured_until = until;
+  }
+  for (const member of injuredMembers) {
+    const until = now + WORLD_BOSS_INJURY_DURATION_MS;
+    draft.addStatement(updateDiscipleInjuryStatement(member.id, until));
+    const row = draft.disciples.find((item) => item.id === member.id);
+    if (row !== undefined) row.injured_until = until;
+  }
+  for (const member of members) {
+    draft.addStatement(
+      insertDiscipleBossBattleStatement({
+        id: crypto.randomUUID(),
+        discipleId: member.id,
+        sectId: draft.sect.id,
+        now,
+      }),
+    );
+  }
+
+  const hitId = crypto.randomUUID();
+  draft.addStatement(
+    insertWorldBossHitStatement({
+      id: hitId,
+      bossId: boss.id,
+      sectId: draft.sect.id,
+      sectName: draft.sect.name,
+      discipleNames: JSON.stringify(members.map((member) => member.name)),
+      discipleIds: JSON.stringify(members.map((member) => member.id)),
+      injuredNames: JSON.stringify(injuredMembers.map((member) => member.name)),
+      severeNames: JSON.stringify(severeMembers.map((member) => member.name)),
+      damage: actualDamage,
+      isCrit: crit,
+      now,
+    }),
+  );
+  draft.addStatement(updateWorldBossHpStatement(boss.id, actualDamage, draft.sect.id, now));
+
+  await draft.commit();
+
+  const after = await repo.findById(boss.id);
+  const displayName = bossDisplayName(Number(boss.boss_index), Number(boss.stage));
+  const lastHit =
+    after !== null && after.status === 'killed' && after.killer_sect_id === draft.sect.id;
+  let nextStage: number | null = null;
+
+  if (lastHit) {
+    await repo.execute(markWorldBossHitLastHitStatement(hitId));
+    const stage = Number(boss.stage) + 1;
+    // 连战：这一刀打死了，立刻开下一关（仍要在开放时段内才开）。
+    const created = isWorldBossAttackable(worldBossPhaseOf(now))
+      ? await spawnWorldBossStage({
+          repo,
+          now,
+          dayKey,
+          stage,
+          roundDamage: Number(boss.round_damage),
+        })
+      : null;
+    if (created === null) {
+      await broadcastWorldBoss(
+        db,
+        `【讨伐】${draft.sect.name}一击斩落${displayName}！讨伐成功，今日讨伐结束`,
+        now,
+      );
+    } else {
+      nextStage = stage;
+      await broadcastWorldBoss(
+        db,
+        `【讨伐】${draft.sect.name}一击斩落${displayName}！讨伐成功，${bossDisplayName(created.boss_index, stage)}（${affixNameOf(created.affix)}）已降临`,
+        now,
+      );
+    }
+  } else if (
+    after !== null &&
+    after.status === 'active' &&
+    Number(after.half_announced) === 0 &&
+    Number(after.hp) * 2 < Number(after.max_hp)
+  ) {
+    await repo.execute(markWorldBossHalfAnnouncedStatement(after.id));
+    await broadcastWorldBoss(db, `【讨伐】${displayName} 血量已不足一半！`, now);
+  }
+
+  if (actualDamage > previousTopDamage) {
+    // 出战超过 3 人时不逐个列名（一次最多 10 人），写「门下 N 名弟子」。
+    const names =
+      members.length > 3 ? `门下 ${String(members.length)} 名弟子` : members.map((member) => member.name).join('、');
+    await broadcastWorldBoss(
+      db,
+      `【讨伐】${draft.sect.name} · ${names} 打出 ${String(actualDamage)}，刷新史上最强一击！`,
+      now,
+    );
+  }
+
+  for (const member of severeMembers) {
+    await broadcastWorldBoss(
+      db,
+      `【讨伐】${draft.sect.name}门下${member.name}被${bossDefAt(Number(boss.boss_index)).name}重创，需静养一日`,
+      now,
+    );
+  }
+
+  // 面板：打死之后如果已经开出下一关，就把新关卡交给前端（可以直接接着打）。
+  const viewBoss = nextStage === null ? after : await repo.findLatestByDayKey(dayKey);
+  return {
+    state: draft.view(),
+    result: {
+      damage,
+      actualDamage,
+      crit,
+      frenzy,
+      lastHit,
+      bossHp: after === null ? 0 : Number(after.hp),
+      bossMaxHp: after === null ? Number(boss.max_hp) : Number(after.max_hp),
+      nextStage,
+      members: outcomes,
+    },
+    boss: await buildWorldBossView({
+      db,
+      sectId: draft.sect.id,
+      now,
+      boss: viewBoss,
+      rewardContext: worldBossRewardContext(draft.view()),
+      dailyAttackLimit,
+    }),
+  };
+}
+/**
+ * 0027 世界 Boss：Cron 的每 10 分钟处理（出现 → 逃走 → 发奖 → 清理疲劳记录）。
+ *
+ * Workers 不等未完成的 Promise，所以每一步都 await；各步各自兜错，
+ * 前一步失败不会挡住后面的发奖。
+ */
+export async function processWorldBoss(db: D1Database, now: number): Promise<void> {
+  try {
+    await spawnWorldBoss(db, now);
+  } catch (error) {
+    console.warn(`world_boss_spawn_failed now=${String(now)} error=${String(error)}`);
+  }
+  try {
+    await fleeExpiredWorldBosses(db, now);
+  } catch (error) {
+    console.warn(`world_boss_flee_failed now=${String(now)} error=${String(error)}`);
+  }
+  try {
+    await rewardFinishedWorldBosses(db, now);
+  } catch (error) {
+    console.warn(`world_boss_reward_failed now=${String(now)} error=${String(error)}`);
+  }
+  try {
+    await cleanupWorldBossBattles(db, now);
+  } catch (error) {
+    console.warn(`world_boss_cleanup_failed now=${String(now)} error=${String(error)}`);
+  }
+}
+
+/**
+ * 出现：阶段到了（08:00 之后）且今天还没有第 1 关 → 算一轮伤害与血量、插入、广播。
+ * 后续关卡由「击杀」那条路径就地生成（见 attackWorldBoss），不用等 Cron。
+ */
+async function spawnWorldBoss(db: D1Database, now: number): Promise<void> {
+  if (!isWorldBossAttackable(worldBossPhaseOf(now))) return;
+
+  const repo = new WorldBossRepository(db);
+  const dayKey = dateKeyUtc8(now);
+  const latest = await repo.findLatestByDayKey(dayKey);
+  // 今天已有进行中的关卡，或最新一关已逃走：不生成。
+  if (latest !== null && latest.status !== 'killed') return;
+
+  // 补位：最新一关已被击杀却没有下一关（正常由击杀那次出手就地生成；
+  // 那条路径失败、或是一期规则下打死的旧 Boss 时，由 Cron 兜底补上）。
+  const stage = latest === null ? 1 : Number(latest.stage) + 1;
+  // 一期迁移过来的旧行 round_damage = 0，不能拿来算血量，重新计算。
+  const storedRound = latest === null ? 0 : Number(latest.round_damage);
+  const roundDamage = storedRound > 0 ? storedRound : await worldBossRoundDamage(db, repo, now);
+  const created = await spawnWorldBossStage({ repo, now, dayKey, stage, roundDamage });
+  if (created === null) return;
+
+  await broadcastWorldBoss(
+    db,
+    `【讨伐】${bossDisplayName(created.boss_index, stage)}（${affixNameOf(created.affix)}）降临！全服共讨，每宗门每 3 秒可出手一次`,
+    now,
+  );
+}
+
+/**
+ * 逃走：今天的关卡过了 23:00 仍 active → 逃走；隔夜残留（Cron 漏跑）一并收口，
+ * 否则那条记录永远不会进入发奖。血掉 ≥70% 记为「已击退」。
+ */
+async function fleeExpiredWorldBosses(db: D1Database, now: number): Promise<void> {
+  const repo = new WorldBossRepository(db);
+  const actives = await repo.findActiveBosses();
+  if (actives.length === 0) return;
+
+  const dayKey = dateKeyUtc8(now);
+  const phase = worldBossPhaseOf(now);
+  for (const boss of actives) {
+    if (boss.day_key > dayKey) continue;
+    if (boss.day_key === dayKey && phase !== 'closed') continue;
+    await repo.execute(markWorldBossFledStatement(boss.id, now));
+    const name = bossDisplayName(Number(boss.boss_index), Number(boss.stage));
+    await broadcastWorldBoss(
+      db,
+      isFledByDamage(Number(boss.max_hp), Number(boss.hp))
+        ? `【讨伐】${name} 负伤遁走（已击退）`
+        : `【讨伐】${name} 逃走了，明日再战`,
+      now,
+    );
+  }
+}
+
+/** 发奖：所有已结束且还没发奖的关卡。 */
+async function rewardFinishedWorldBosses(db: D1Database, now: number): Promise<void> {
+  const repo = new WorldBossRepository(db);
+  const bosses = await repo.findUnrewardedEnded();
+  for (const boss of bosses) {
+    await rewardWorldBoss(db, repo, boss, now);
+  }
+}
+
+/**
+ * 单关发奖（计划 2.8）。
+ *
+ * 二期取消了「打破奖池再按伤害占比分」：每个参与宗门拿的是**自己**的基础份
+ *   max(该宗门产出(r) × 1.0, 保底(L)) × 关卡系数 × 排名倍数
+ * 排名由「对该关的总伤害」决定（并列取先达到者）；击退（≥70%）时资源 ×0.5。
+ * 击杀时另发：每个参与者 聚气丹 ×1、第 1 名 淬体丹 ×1、最后一击 灵石 max(产出 × 0.5, 保底) × 关卡系数。
+ * 装备二期：玄铁按伤害占比给（不足 15% 每关 1 个）；三期：功勋按 √伤害占比给（击退减半）。
+ * 三期：装备掉落改为每个参与宗门按 √伤害占比各自判定（不再只给伤害第 1 名，计划 2.1）。
+ * 全部语句与「标记已发奖」放在同一个 db.batch 里 —— 要么都成功，要么都没发。
+ */
+async function rewardWorldBoss(
+  db: D1Database,
+  repo: WorldBossRepository,
+  boss: WorldBossRow,
+  now: number,
+): Promise<void> {
+  const hits = await repo.hitsByBoss(boss.id);
+  const killed = boss.status === 'killed';
+  const stage = Number(boss.stage);
+  const repelled = !killed && isFledByDamage(Number(boss.max_hp), Number(boss.hp));
+  const statements: ParameterizedQuery[] = [];
+
+  // 参与者 = 对该关造成过伤害（>0）的宗门，按总伤害降序，并列取先达到者。
+  const bySect = new Map<string, { damage: number; firstAt: number }>();
+  for (const hit of hits) {
+    if (Number(hit.damage) <= 0) continue;
+    const entry = bySect.get(hit.sect_id);
+    if (entry === undefined) {
+      bySect.set(hit.sect_id, {
+        damage: Number(hit.damage),
+        firstAt: Number(hit.created_at),
+      });
+      continue;
+    }
+    entry.damage += Number(hit.damage);
+    entry.firstAt = Math.min(entry.firstAt, Number(hit.created_at));
+  }
+  const participants = [...bySect.entries()].sort(
+    (a, b) => b[1].damage - a[1].damage || a[1].firstAt - b[1].firstAt,
+  );
+
+  // 讨伐奖励记录的账本：宗门 → 名次、实际入账的资源（最小单位）、获得的物品、是否最后一击。
+  const rewardLedger = new Map<
+    string,
+    { rank: number; effects: Record<string, number>; items: string[]; lastHit: boolean }
+  >();
+  const creditLedger = (sectId: string, resourceId: string, amount: number): void => {
+    const entry = rewardLedger.get(sectId);
+    if (entry === undefined || amount <= 0) return;
+    entry.effects[resourceId] = (entry.effects[resourceId] ?? 0) + amount;
+  };
+
+  // 防通胀：奖励入账不超过资源容量（与挂机产出同一口径），溢出部分丢弃并记进天机录。
+  // 余额按「上次结算」的库存算、同一宗门多笔入账累加；写库用 resourceCreditCappedStatement 在 SQL 里再夹一次。
+  const balancesBySect = new Map<string, Map<string, number>>();
+  const capacityMultiplierBySect = new Map<string, number>();
+  const overflowBySect = new Map<string, Record<string, number>>();
+  const credit = (sectId: string, resourceId: string, amount: number): void => {
+    if (amount <= 0) return;
+    const definition = gameConfig().resources.find((item) => item.id === resourceId);
+    const balances = balancesBySect.get(sectId) ?? new Map<string, number>();
+    const balance = balances.get(resourceId) ?? 0;
+    const capacity =
+      definition === undefined
+        ? Number.MAX_SAFE_INTEGER
+        : effectiveCapacity(definition.capacity, capacityMultiplierBySect.get(sectId) ?? 1);
+    const actual = Math.max(0, Math.min(amount, capacity - balance));
+    if (actual < amount) {
+      const overflow = overflowBySect.get(sectId) ?? {};
+      overflow[resourceId] = (overflow[resourceId] ?? 0) + (amount - actual);
+      overflowBySect.set(sectId, overflow);
+    }
+    if (actual <= 0) return;
+    balances.set(resourceId, balance + actual);
+    balancesBySect.set(sectId, balances);
+    statements.push(resourceCreditCappedStatement(sectId, resourceId, actual, capacity, now));
+    creditLedger(sectId, resourceId, actual);
+  };
+
+  // 0028 装备：本关击杀掉落的装备（发奖成功后用它广播仙品）。
+  const bossDrops: { sectId: string; name: string; quality: string }[] = [];
+
+  // 击杀与击退才发资源；单纯逃走（<70%）什么也不发。
+  if (participants.length > 0 && (killed || repelled)) {
+    const sectRows = await repo.sectsByIds(participants.map(([sectId]) => sectId));
+    const levelById = new Map(sectRows.map((row) => [row.id, Number(row.level)]));
+    const config = gameConfig();
+
+    // 只读参与宗门的弟子 / 建筑 / 在外记录 / 余额（参与宗门最多几个，不做全表扫）。
+    const ratesById = new Map<string, Map<string, number>>();
+    for (const [sectId] of participants) {
+      const [disciples, buildings, journeys, balances] = await Promise.all([
+        new DiscipleRepository(db).findBySectId(sectId),
+        new BuildingRepository(db).findBySectId(sectId),
+        new DiscipleJourneyRepository(db).findOpenBySectId(sectId),
+        new ResourceBalanceRepository(db).findBySectId(sectId),
+      ]);
+      ratesById.set(sectId, resourceRatesOfSect({ config, disciples, buildings, journeys, now }));
+      balancesBySect.set(sectId, new Map(balances.map((row) => [row.resource_id, Number(row.balance)])));
+      capacityMultiplierBySect.set(sectId, findSectLevel(levelById.get(sectId) ?? 1).capacityMultiplier);
+    }
+
+    const totalDamage = participants.reduce((sum, [, info]) => sum + info.damage, 0);
+    participants.forEach(([sectId, info], index) => {
+      rewardLedger.set(sectId, { rank: index + 1, effects: {}, items: [], lastHit: false });
+      // 装备二期 / 三期：玄铁给伤害占比 ≥15% 的宗门（第 1 名更多，击退减半）；占比不足 15% 每关也给 1 个。
+      const xuantie = bossXuantieFor({
+        stage,
+        damageShare: totalDamage > 0 ? info.damage / totalDamage : 0,
+        isTop: index === 0,
+        repelled,
+      });
+      credit(sectId, XUANTIE_RESOURCE_ID, xuantie * 1000);
+      // 三期：功勋按本关伤害占比发（击杀给 base，击退减半），与玄铁一起进同一个 batch。
+      const merit = worldBossMeritFor({
+        stage,
+        damageShare: totalDamage > 0 ? info.damage / totalDamage : 0,
+        repelled,
+      });
+      credit(sectId, BOSS_MERIT_RESOURCE_ID, merit * 1000);
+      const rewards = stageResourceRewards({
+        rates: ratesRecordOf(ratesById.get(sectId) ?? new Map()),
+        sectLevel: levelById.get(sectId) ?? 1,
+        stage,
+        rank: index + 1,
+        ...(repelled ? { repelled: true } : {}),
+      });
+      for (const [resourceId, amount] of Object.entries(rewards)) {
+        credit(sectId, resourceId, amount);
+      }
+    });
+
+    // 丹药与最后一击只随击杀发放。
+    if (killed) {
+      for (const [sectId] of participants) {
+        statements.push(
+          incrementPillInventoryStatement(sectId, WORLD_BOSS_KILL_PILL_ID, 1, now),
+        );
+        rewardLedger.get(sectId)?.items.push('聚气丹');
+      }
+      const topSectId = participants[0]?.[0];
+      if (topSectId !== undefined) {
+        statements.push(
+          incrementPillInventoryStatement(topSectId, WORLD_BOSS_TOP_DAMAGE_PILL_ID, 1, now),
+        );
+        rewardLedger.get(topSectId)?.items.push('淬体丹');
+      }
+      const killerSectId = boss.killer_sect_id;
+      if (killerSectId !== null) {
+        const killerRates = ratesById.get(killerSectId);
+        if (killerRates !== undefined) {
+          const amount = lastHitReward(
+            killerRates.get('spiritStone') ?? 0,
+            levelById.get(killerSectId) ?? 1,
+            stage,
+          );
+          credit(killerSectId, 'spiritStone', amount);
+          const killerEntry = rewardLedger.get(killerSectId);
+          if (killerEntry !== undefined) killerEntry.lastHit = true;
+        }
+      }
+
+      // 0028 装备掉落（计划 1.4 / 三期 2.1）：只有**击杀**才掉，每个参与宗门按本关伤害占比**各自**判定 ——
+      // 高档概率 = 75% × √占比，未中再 40% 概率得低档；部位随机、法器主属性随机。
+      // 该宗门背包已满时这一件**自动分解**成对应品质的矿石入账（东西不会丢）。
+      const equipmentRepo = new EquipmentRepository(db);
+      const bagUsedBySect = new Map<string, number>();
+      for (const [sectId, info] of participants) {
+        const quality = rollBossDrop({
+          stage,
+          damageShare: totalDamage > 0 ? info.damage / totalDamage : 0,
+          random: Math.random,
+        });
+        if (quality === null) {
+          continue;
+        }
+        const slotIndex = Math.min(
+          EQUIPMENT_SLOTS.length - 1,
+          Math.max(0, Math.floor(Math.random() * EQUIPMENT_SLOTS.length)),
+        );
+        const slot = EQUIPMENT_SLOTS[slotIndex]!.id;
+        // 掉落时不给主属性 → 法器在身法 / 幸运之间随机（兵器固定攻击、护甲固定防御）。
+        const mainAttr = resolveMainAttr(slot, undefined, Math.random);
+        if (mainAttr === null) {
+          continue;
+        }
+        const generated = generateEquipment({ slot, quality, mainAttr, random: Math.random });
+
+        let bagUsed = bagUsedBySect.get(sectId);
+        if (bagUsed === undefined) {
+          bagUsed = await equipmentRepo.countBagBySectId(sectId);
+        }
+        if (bagUsed >= BAG_CAPACITY) {
+          credit(sectId, 'ore', salvageOreUnits(quality));
+          credit(sectId, XUANTIE_RESOURCE_ID, salvageXuantieUnits(quality));
+          rewardLedger.get(sectId)?.items.push(`${generated.name}（背包已满，已分解）`);
+          continue;
+        }
+        bagUsedBySect.set(sectId, bagUsed + 1);
+        statements.push(
+          insertEquipmentStatement({
+            id: crypto.randomUUID(),
+            sectId,
+            slot: generated.slot,
+            quality: generated.quality,
+            name: generated.name,
+            mainAttr: generated.mainAttr,
+            mainValue: generated.mainValue,
+            subAttr: generated.subAttr,
+            subValue: generated.subValue,
+            source: 'boss',
+            now,
+          }),
+        );
+        bossDrops.push({ sectId, name: generated.name, quality: generated.quality });
+        rewardLedger.get(sectId)?.items.push(generated.name);
+      }
+    }
+  }
+
+  // 讨伐奖励记录：每个参与宗门一条天机录（和发奖同一个 batch；同步时会弹出「奖励到账」提示）。
+  const bossLabel = bossDisplayName(Number(boss.boss_index), stage);
+  for (const [sectId, entry] of rewardLedger) {
+    const honors = [`伤害第 ${String(entry.rank)} 名`, ...(entry.lastHit ? ['最后一击'] : [])].join('、');
+    const itemsText = entry.items.length > 0 ? `，获得 ${entry.items.join('、')}` : '';
+    const overflow = Object.entries(overflowBySect.get(sectId) ?? {});
+    const overflowText =
+      overflow.length > 0
+        ? `（仓库已满，溢出 ${overflow
+            .map(([resourceId, amount]) => `${gameConfig().resources.find((item) => item.id === resourceId)?.name ?? resourceId} ${displayAmount(amount)}`)
+            .join('、')}）`
+        : '';
+    statements.push(
+      insertEventLogStatement({
+        id: crypto.randomUUID(),
+        sectId,
+        eventId: 'worldBossReward',
+        description: `讨伐${bossLabel}${killed ? '' : '（击退）'}：${honors}${itemsText}${overflowText}`,
+        effects: JSON.stringify(
+          Object.fromEntries(Object.entries(entry.effects).map(([resourceId, amount]) => [resourceId, String(amount)])),
+        ),
+        now,
+      }),
+    );
+  }
+
+  // 发奖与「标记已发」同一个 batch：整批成功执行过，就不会再发第二次。
+  statements.push(markWorldBossRewardedStatement(boss.id, now));
+  await db.batch(prepareStatements(db, statements));
+
+  // 发奖成功后广播一次（奖励是静默入账的，靠这条让玩家知道去看资源）；失败不影响发奖。
+  const top = participants[0];
+  if ((killed || repelled) && top !== undefined) {
+    const topName = hits.find((hit) => hit.sect_id === top[0])?.sect_name ?? '';
+    await broadcastWorldBoss(
+      db,
+      `【讨伐】${bossDisplayName(Number(boss.boss_index), stage)} ${killed ? '讨伐' : '击退'}奖励已发放（${String(participants.length)} 个宗门参与，伤害第一：${topName}）`,
+      now,
+    );
+  }
+
+  // 0028 装备：掉到**仙品**时额外广播一条（其他品质静默入背包，计划 1.4）。
+  for (const drop of bossDrops) {
+    if (drop.quality !== 'immortal') {
+      continue;
+    }
+    const sectName = hits.find((hit) => hit.sect_id === drop.sectId)?.sect_name ?? '';
+    await broadcastWorldBoss(db, `【讨伐】${sectName}获得 ${drop.name}！`, now);
+  }
+}
+
+/**
+ * 疲劳记录只留 2 天（Cron 顺带清理，防表无限增长）。
+ * DELETE 按 created_at 过滤没有索引、每次都扫全表：只在每小时的第一个 10 分钟 tick 执行一次。
+ */
+async function cleanupWorldBossBattles(db: D1Database, now: number): Promise<void> {
+  if (new Date(now).getUTCMinutes() >= 10) return;
+  const repo = new WorldBossRepository(db);
+  await repo.deleteBattlesBefore(now - WORLD_BOSS_BATTLE_RETENTION_MS);
+}
+
+/* ---------- 三期：功勋兑换（POST /game/world-boss/exchange） ---------- */
+
+/** GET /game/merit-shop：功勋兑换弹窗的分类、价目与可选部位（纯配置，不读库）。 */
+export function getMeritShop(): MeritShopView {
+  return {
+    categories: MERIT_SHOP_CATEGORIES.map((category) => ({ id: category.id, name: category.name })),
+    items: WORLD_BOSS_MERIT_SHOP.map((item) => ({
+      id: item.id,
+      name: item.name,
+      cost: item.cost,
+      category: item.category,
+      quality: item.quality,
+      color: item.quality === null ? null : qualityColorOf(item.quality),
+    })),
+    slots: equipmentSlotViews(),
+    maxResourceQuantity: WORLD_BOSS_MERIT_XUANTIE_MAX,
+  };
+}
+
+/** 功勋兑换回执（纯命令结果）；不属于任何公开视图。 */
+export interface BossMeritExchangeOutcome {
+  itemId: string;
+  /** 花掉的功勋（最小单位）。 */
+  cost: number;
+  /** 兑换到的玄铁（最小单位）；兑换装备时为 0。 */
+  xuantie: number;
+  /** 兑换到的装备；兑换玄铁时为 null。 */
+  equipment: { id: string; name: string; quality: string; slot: string; slotName: string } | null;
+}
+
+/**
+ * 功勋兑换（计划 2.4）：结算 → 价目 / 数量 / 部位与主属性 / 背包 / 功勋余额校验
+ * → 扣功勋 + 发玄铁或一件装备，只做**一次**受保护 batch。
+ *
+ * 与炼器不同：必定成功、不需要炼器坊等级、不花灵石矿石；装备的部位由玩家自选
+ * （法器**必须**给身法 / 幸运，其它部位**不许**给主属性 —— 与炼器共用同一套校验）。
+ * 装备的 source 记 'boss'（不新增来源类型）。
+ */
+export async function exchangeBossMerit(
+  db: D1Database,
+  userId: string,
+  input: { itemId: string; quantity?: number; slot?: string; mainAttr?: string },
+  now: number,
+): Promise<{ state: SectStateView; outcome: BossMeritExchangeOutcome }> {
+  const draft = await draftFor(db, userId, now);
+  const item = findMeritShopItem(input.itemId);
+  if (item === undefined) {
+    throw new AppError('VALIDATION_ERROR', '未知兑换项');
+  }
+  // 价目表里的 cost 是展示单位，入库一律是最小单位。
+  const costMinUnits = item.cost * 1000;
+  const quality = item.quality;
+
+  // 玄铁：不许带部位 / 主属性；数量 1~WORLD_BOSS_MERIT_XUANTIE_MAX，缺省 1。
+  if (quality === null) {
+    if (input.slot !== undefined || input.mainAttr !== undefined) {
+      throw new AppError('VALIDATION_ERROR', '兑换玄铁不需要选择部位');
+    }
+    const quantity = input.quantity ?? 1;
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > WORLD_BOSS_MERIT_XUANTIE_MAX) {
+      throw new AppError(
+        'VALIDATION_ERROR',
+        `一次最多兑换 ${String(WORLD_BOSS_MERIT_XUANTIE_MAX)} 个玄铁`,
+      );
+    }
+    draft.requireResource(BOSS_MERIT_RESOURCE_ID, costMinUnits * quantity);
+    draft.addResource(XUANTIE_RESOURCE_ID, quantity * 1000);
+    await draft.commit();
+    return {
+      state: draft.view(),
+      outcome: {
+        itemId: item.id,
+        cost: costMinUnits * quantity,
+        xuantie: quantity * 1000,
+        equipment: null,
+      },
+    };
+  }
+
+  // 装备：一次只能 1 件；部位与主属性的校验与炼器完全相同。
+  if (input.quantity !== undefined && input.quantity !== 1) {
+    throw new AppError('VALIDATION_ERROR', '装备一次只能兑换 1 件');
+  }
+  const requested = resolveRequestedEquipment(input.slot, input.mainAttr);
+  const { bagCount } = await loadEquipment(db, draft.sect.id);
+  if (bagCount >= BAG_CAPACITY) {
+    throw new AppError('INVALID_STATUS', bagFullReason(bagCount));
+  }
+  draft.requireResource(BOSS_MERIT_RESOURCE_ID, costMinUnits);
+  const generated = generateEquipment({
+    slot: requested.slot,
+    quality,
+    mainAttr: requested.mainAttr,
+    random: Math.random,
+  });
+  const equipmentId = crypto.randomUUID();
+  draft.addStatement(
+    insertEquipmentStatement({
+      id: equipmentId,
+      sectId: draft.sect.id,
+      slot: generated.slot,
+      quality: generated.quality,
+      name: generated.name,
+      mainAttr: generated.mainAttr,
+      mainValue: generated.mainValue,
+      subAttr: generated.subAttr,
+      subValue: generated.subValue,
+      source: 'boss',
+      now,
+    }),
+  );
+  await draft.commit();
+  if (generated.quality === 'immortal') {
+    await broadcastWorldBoss(db, `【讨伐】${draft.sect.name}以功勋兑换 ${generated.name}！`, now);
+  }
+  return {
+    state: draft.view(),
+    outcome: {
+      itemId: item.id,
+      cost: costMinUnits,
+      xuantie: 0,
+      equipment: {
+        id: equipmentId,
+        name: generated.name,
+        quality: generated.quality,
+        slot: generated.slot,
+        slotName: slotNameOf(generated.slot),
+      },
+    },
+  };
 }
 
 /* ---------- 坊市（shop.ts 的纯规则 + 受保护 batch 提交） ---------- */

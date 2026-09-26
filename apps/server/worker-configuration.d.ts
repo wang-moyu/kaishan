@@ -8,6 +8,7 @@ interface __BaseEnv_Env {
 	LOGIN_RATE_LIMIT_WINDOW_SECONDS: "60";
 	ALLOWED_ORIGINS: "";
 	REALM_EXPLORE_ENABLED: "false";
+	WORLD_BOSS_DAILY_ATTACK_LIMIT: "120";
 	REGISTRATION_ENABLED: string;
 	INVITE_CODES: string;
 	ENVIRONMENT: string;
@@ -23,7 +24,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "SESSION_TTL_SECONDS" | "LOGIN_RATE_LIMIT_MAX_ATTEMPTS" | "LOGIN_RATE_LIMIT_WINDOW_SECONDS" | "ALLOWED_ORIGINS" | "REALM_EXPLORE_ENABLED" | "REGISTRATION_ENABLED" | "INVITE_CODES" | "ENVIRONMENT">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "SESSION_TTL_SECONDS" | "LOGIN_RATE_LIMIT_MAX_ATTEMPTS" | "LOGIN_RATE_LIMIT_WINDOW_SECONDS" | "ALLOWED_ORIGINS" | "REALM_EXPLORE_ENABLED" | "WORLD_BOSS_DAILY_ATTACK_LIMIT" | "REGISTRATION_ENABLED" | "INVITE_CODES" | "ENVIRONMENT">> {}
 }
 
 // Begin runtime types
